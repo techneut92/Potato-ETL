@@ -1,0 +1,36 @@
+[package]
+name    = "potato_etl"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name       = "potato_etl"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3      = { version = "0.28", features = ["extension-module"] }
+arrow     = { version = "58",   features = ["pyarrow"] }
+tokio     = { version = "1",    features = ["full"] }
+indexmap  = { version = "2",    features = ["serde"] }
+anyhow    = { workspace = true }
+futures   = { workspace = true }
+
+# Core with features the wheel should expose.
+[dependencies.potato-etl-runtime]
+path     = "../runtime"
+features = []
+
+[features]
+default  = []
+all      = ["postgres", "oracle", "mssql", "mysql", "databricks", "databricks-thrift"]
+oracle   = ["potato-etl-runtime/oracle"]
+mssql    = ["potato-etl-runtime/mssql"]
+postgres = ["potato-etl-runtime/postgres"]
+mysql    = ["potato-etl-runtime/mysql"]
+databricks = ["potato-etl-runtime/databricks"]
+databricks-thrift = ["potato-etl-runtime/databricks-thrift"]
+
+[profile.release]
+lto           = true
+codegen-units = 1
+strip         = true

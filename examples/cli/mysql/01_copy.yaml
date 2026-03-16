@@ -1,0 +1,60 @@
+# examples/cli/mysql/01_copy.yaml
+#
+# Read all employees from MySQL/MariaDB, write to employees_active.
+# Change `driver: mysql` to `driver: aurora` or `driver: mariadb` as needed —
+# all three use the same wire protocol and the same feature flag.
+#
+# Run:
+#   cargo run -p potato-etl-cli --features mysql -- run \
+#     --config examples/cli/mysql/01_copy.yaml
+
+config:
+  batch_size: 500
+  log_level: info
+
+connections:
+  db:
+    driver: mysql                 # also: aurora, mariadb — same wire protocol
+    host: localhost
+    port: 3306
+    database: etl_demo
+    auth:
+      type: user_pass
+      username: etl_user
+      password: "etl_pass"
+    options:
+      ssl_mode: preferred         # disabled | preferred | required
+
+steps:
+
+  - id: src
+    type: read_db
+    from:
+      connection: db
+      table: employees
+      cursor: id
+
+  - id: active
+    type: filter
+    input: src
+    condition: "status == \"active\""
+
+  - id: enriched
+    type: map
+    input: active
+    columns:
+      bonus: "salary * 0.10"
+
+  - id: out
+    type: write_db
+    input: enriched
+    target:
+      connection: db
+      table: employees_active
+    mode: upsert
+    create_table: if_not_exists
+    schema:
+      database:
+        columns:
+          id:
+            primary_key: true

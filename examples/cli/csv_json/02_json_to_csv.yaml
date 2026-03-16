@@ -1,0 +1,38 @@
+# examples/cli/csv_json/02_json_to_csv.yaml
+#
+# JSON → CSV roundtrip
+#
+# Reads the nested candidates JSON, flattens it, and writes a denormalized
+# CSV report — one row per candidate with their first talent pool name.
+#
+# Demonstrates: read_json, flatten, write_csv
+#
+# Run:
+#   cargo run -p potato-etl-cli -- run \
+#     --config examples/cli/csv_json/02_json_to_csv.yaml
+
+config:
+  batch_size: 1000
+
+steps:
+
+  - id: raw
+    type: read_json
+    path: examples/cli/unnest/candidates.json
+    data_path: candidates
+
+  - id: candidates
+    type: flatten
+    input: raw
+    select:
+      id:     id
+      name:   first_name
+      email:  email
+      status: status
+
+  - id: output
+    type: write_csv
+    input: candidates
+    path: output/candidates_flat.csv
+    delimiter: ";"
+    has_header: true

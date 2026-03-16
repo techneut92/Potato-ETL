@@ -1,0 +1,64 @@
+# examples/cli/mssql/02_bcp_bulk.yaml
+#
+# High-throughput MSSQL bulk load using the bcp CLI tool.
+# bcp achieves ~500k–2M rows/sec vs ~50k–150k for the default tiberius path.
+#
+# Prerequisites:
+#   sudo apt install mssql-tools18        # Ubuntu / Debian
+#   brew install microsoft/mssql-release/mssql-tools18   # macOS
+#
+# Run:
+#   cargo run -p potato-etl-cli --features mssql -- run \
+#     --config examples/cli/mssql/02_bcp_bulk.yaml
+
+config:
+  batch_size: 50000               # large batches amortise bcp process overhead
+  log_level: info
+
+connections:
+  mssql:
+    driver: mssql
+    host: localhost
+    port: 1433
+    database: etl_demo
+    auth:
+      type: user_pass
+      username: sa
+      password: "YourPassword1!"
+
+steps:
+
+  - id: src
+    type: read_db
+    from:
+      connection: mssql
+      schema: dbo
+      table: employees
+      cursor: id
+    normalize_columns: true
+
+  - id: active
+    type: filter
+    input: src
+    condition: "status == \"active\""
+
+  - id: enriched
+    type: map
+    input: active
+    columns:
+      bonus: "salary * 0.12"
+      load_ts: "now()"
+
+  - id: out
+    type: write_db
+    input: enriched
+    target:
+      connection: mssql
+      schema: dbo
+      table: employees_active
+    mode: truncate
+    create_table: if_not_exists
+    options:
+      bcp: true
+      bcp_path: /opt/mssql-tools18/bin/bcp   # auto-discovered if omitted
+      bulk_batch_size: 10000                  # rows per bcp -b commit batch

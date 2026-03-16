@@ -1,0 +1,50 @@
+# examples/cli/oracle/01_copy.yaml
+#
+# Read EMPLOYEES from Oracle XE, write to EMPLOYEES_ACTIVE.
+# normalize_columns: true lowercases Oracle's default UPPERCASE column names.
+#
+# Oracle Instant Client must be installed and on LD_LIBRARY_PATH.
+#
+# Run:
+#   cargo run -p potato-etl-cli --features oracle -- run \
+#     --config examples/cli/oracle/01_copy.yaml
+
+config:
+  batch_size: 500
+  log_level: info
+
+connections:
+  ora:
+    driver: oracle
+    host: localhost
+    port: 1521
+    service: XEPDB1               # pluggable DB service name (Oracle 12c+)
+    auth:
+      type: user_pass
+      username: etl_user
+      password: "etl_pass"
+
+steps:
+
+  - id: src
+    type: read_db
+    from:
+      connection: ora
+      table: EMPLOYEES
+      cursor: ID
+    normalize_columns: true       # EMPLOYEES → employees, ID → id, etc.
+    options:
+      prefetch_rows: 200          # rows fetched per OCI round-trip (default: 2)
+
+  - id: active
+    type: filter
+    input: src
+    condition: "status == \"active\""
+
+  - id: out
+    type: write_db
+    input: active
+    target:
+      connection: ora
+      table: EMPLOYEES_ACTIVE
+    mode: truncate

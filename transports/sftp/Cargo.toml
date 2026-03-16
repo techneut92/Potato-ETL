@@ -1,0 +1,16 @@
+[package]
+name    = "potato-etl-transport-sftp"
+version = "0.1.0"
+edition = "2024"
+
+# SFTP file transport — read/write files via SSH File Transfer Protocol.
+# Uses russh + russh-sftp for a pure-Rust, async SSH implementation.
+
+[dependencies]
+potato-etl-common = { workspace = true }
+russh             = { workspace = true }
+russh-sftp        = { workspace = true }
+tokio             = { workspace = true }
+async-trait       = { workspace = true }
+anyhow            = { workspace = true }
+tracing           = { workspace = true }

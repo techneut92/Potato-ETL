@@ -1,0 +1,36 @@
+[package]
+name    = "potato-etl-driver-databricks"
+version = "0.1.0"
+edition = "2024"
+
+# Databricks SQL warehouse driver.
+# Default: REST SQL Statement API (pure Rust, no system deps).
+# Optional: ODBC read path via `odbc` feature (requires Simba driver).
+
+[dependencies]
+potato-etl-common = { workspace = true }
+arrow        = { workspace = true }
+tokio        = { workspace = true }
+futures      = { workspace = true }
+async-stream = { workspace = true }
+anyhow       = { workspace = true }
+chrono       = { workspace = true }
+tracing      = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+reqwest      = { workspace = true }
+base64       = { workspace = true }
+uuid         = { workspace = true }
+
+# Thrift transport (optional)
+bytes = { workspace = true, optional = true }
+
+# ODBC read path (optional)
+arrow-odbc = { version = "22", optional = true }
+odbc-api   = { version = "21", optional = true }
+flume      = { version = "0.12", optional = true }
+
+[features]
+default = []
+odbc    = ["dep:arrow-odbc", "dep:odbc-api", "dep:flume"]
+thrift  = ["dep:bytes"]

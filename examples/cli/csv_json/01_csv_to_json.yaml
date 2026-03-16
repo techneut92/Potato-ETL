@@ -1,0 +1,75 @@
+# examples/cli/csv_json/01_csv_to_json.yaml
+#
+# CSV → filter + aggregate → JSON + CSV
+#
+# Reads a CSV file of employees, filters active ones, computes per-department
+# statistics, and writes results to both JSON and CSV formats.
+#
+# Demonstrates: read_csv, filter, aggregate, map, write_json, write_csv
+#
+# Run:
+#   cargo run -p potato-etl-cli -- run \
+#     --config examples/cli/csv_json/01_csv_to_json.yaml
+#
+# Dry-run:
+#   cargo run -p potato-etl-cli -- dry-run \
+#     --config examples/cli/csv_json/01_csv_to_json.yaml --format pretty
+
+config:
+  batch_size: 1000
+  log_level: info
+
+steps:
+
+  # ── SOURCE: read employee CSV ───────────────────────────────────────────────
+
+  - id: employees
+    type: read_csv
+    path: examples/cli/unnest/employees.csv
+    delimiter: ","
+    has_header: true
+
+  # ── FILTER: active employees only ───────────────────────────────────────────
+
+  - id: active_only
+    type: filter
+    input: employees
+    column: active
+    value: "true"
+
+  # ── Write filtered employees as JSON ────────────────────────────────────────
+
+  - id: write_active_json
+    type: write_json
+    input: active_only
+    path: output/active_employees.json
+    pretty: true
+    wrap_key: employees
+
+  # ── AGGREGATE: per-department stats ─────────────────────────────────────────
+
+  - id: dept_stats
+    type: aggregate
+    input: active_only
+    group_by: [department]
+    metrics:
+      headcount:   count()
+      total_salary: sum(salary)
+      avg_salary:   avg(salary)
+      max_salary:   max(salary)
+      min_salary:   min(salary)
+
+  # ── Write department stats as CSV ───────────────────────────────────────────
+
+  - id: write_stats_csv
+    type: write_csv
+    input: dept_stats
+    path: output/department_stats.csv
+
+  # ── Write department stats as JSON (pretty) ─────────────────────────────────
+
+  - id: write_stats_json
+    type: write_json
+    input: dept_stats
+    path: output/department_stats.json
+    pretty: true

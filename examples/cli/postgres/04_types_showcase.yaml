@@ -1,0 +1,100 @@
+# examples/cli/postgres/04_types_showcase.yaml
+#
+# Postgres type showcase — reads type_showcase (seeded by seed.sql) and copies
+# every column through the Arrow pipeline to verify round-trip fidelity.
+#
+# Postgres type        Arrow DataType           LogicalType (if any)
+# ─────────────────────────────────────────────────────────────────────
+# SERIAL / INTEGER     Int32
+# BIGINT               Int64
+# NUMERIC(p,s)         Decimal128(p,s)
+# REAL                 Float32
+# DOUBLE PRECISION     Float64
+# BOOLEAN              Boolean
+# CHAR(n)              Utf8
+# VARCHAR(n)           Utf8
+# TEXT                 Utf8
+# DATE                 Date32
+# TIME                 Time64(Microsecond)
+# TIMESTAMP            Timestamp(Microsecond, None)
+# TIMESTAMPTZ          Timestamp(Microsecond, UTC)
+# UUID                 Utf8                     LogicalType::uuid
+# JSONB / JSON         Utf8                     LogicalType::json
+# INET                 Utf8                     LogicalType::ip
+# MACADDR              Utf8                     LogicalType::macaddr
+# BYTEA                LargeBinary
+# TEXT[]               Utf8  (serialised)       — arrays collapsed to JSON string
+#
+# Run:
+#   cargo run -p potato-etl-cli --features postgres -- run \
+#     --config examples/cli/postgres/04_types_showcase.yaml
+#
+# Print step execution order:
+#   cargo run -p potato-etl-cli --features postgres -- list-steps \
+#     --config examples/cli/postgres/04_types_showcase.yaml
+#
+# Show Arrow schema for `showcase_out` without touching the target:
+#   cargo run -p potato-etl-cli --features postgres -- schema \
+#     --config examples/cli/postgres/04_types_showcase.yaml --step src
+
+config:
+  batch_size: 100
+  log_level: debug                # debug prints schema + first 10 rows per step
+
+connections:
+  pg:
+    driver: postgres
+    host: localhost
+    port: 5432
+    database: etl_demo
+    auth:
+      type: user_pass
+      username: etl_user
+      password: "etl_pass"
+
+steps:
+
+  - id: src
+    type: read_db
+    from:
+      connection: pg
+      table: type_showcase
+      cursor: id
+    # Tell the driver what to do with Postgres-specific types that would
+    # otherwise arrive as Utf8 blobs.
+    schema:
+      arrow:
+        columns:
+          qty:
+            type: int32
+          big_count:
+            type: int64
+          rate:
+            type: float32
+          factor:
+            type: float64
+          is_active:
+            type: boolean
+    # logical_type annotations are no longer needed here — the Postgres source
+    # driver automatically sets etl.logical_type metadata via read_schema()
+    # for uuid, json, ip, macaddr, etc.
+
+  # Add a derived column to prove expressions work on every type
+  - id: enriched
+    type: map
+    input: src
+    columns:
+      price_plus_factor: "price + factor"
+      label_upper:       "upper(label)"
+      loaded_at:         "now()"
+
+  # Write the enriched batch back — create the table from the Arrow schema on
+  # first run; re-running is safe (IF NOT EXISTS is a no-op).
+  - id: showcase_out
+    type: write_db
+    input: enriched
+    target:
+      connection: pg
+      table: type_showcase_out
+    mode: truncate
+    create_table: if_not_exists

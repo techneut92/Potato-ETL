@@ -1,0 +1,68 @@
+# examples/cli/databricks/02_oauth2_source.yaml
+#
+# Read from a Databricks SQL warehouse using OAuth2 M2M (service principal)
+# authentication, and write to MSSQL via ODBC.
+#
+# This is the recommended auth method for automated / service-to-service
+# pipelines — no Personal Access Token (PAT) needed.
+#
+# Required env vars:
+#   DATABRICKS_CLIENT_ID     — OAuth2 application (client) ID
+#   DATABRICKS_CLIENT_SECRET — OAuth2 client secret
+#
+# Run:
+#   cargo run -p potato-etl-cli --features databricks,mssql-odbc -- run \
+#     --config examples/cli/databricks/02_oauth2_source.yaml
+#
+# The OAuth2 flow is automatic:
+#   1. potato_etl POSTs to https://<host>/oidc/v1/token (client credentials)
+#   2. Receives an access_token (typically valid 1 hour)
+#   3. Caches and auto-refreshes before expiry
+
+config:
+  batch_size: 10000
+  log_level: info
+
+connections:
+  databricks_prod:
+    driver: databricks
+    host: adb-4001480147023167.7.azuredatabricks.net
+    http_path: /sql/1.0/warehouses/ecd78902dfed40f2
+    auth:
+      type: oauth2_client_credentials
+      client_id: "${DATABRICKS_CLIENT_ID}"
+      client_secret: "${DATABRICKS_CLIENT_SECRET}"
+    options:
+      schema: gdw_bms_prod
+
+  # Example MSSQL target — adjust to your environment
+  # mssql_dwh:
+  #   driver: mssql
+  #   host: your-sql-server.database.windows.net
+  #   port: 1433
+  #   database: your_db
+  #   auth:
+  #     type: user_pass
+  #     username: "${MSSQL_USER}"
+  #     password: "${MSSQL_PASS}"
+  #   options:
+  #     trust_cert: true
+  #     odbc: true
+
+steps:
+
+  - id: src
+    type: read_db
+    from:
+      connection: databricks_prod
+      table: your_table_name        # <- replace with actual table
+      # cursor: id                  # <- optional: cursor column for pagination
+
+  - id: out
+    type: write_db
+    input: src
+    target:
+      connection: databricks_prod   # <- or change to mssql_dwh for cross-db
+      table: your_target_table
+    mode: truncate
+    create_table: if_not_exists

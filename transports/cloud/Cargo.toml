@@ -1,0 +1,15 @@
+[package]
+name    = "potato-etl-transport-cloud"
+version = "0.1.0"
+edition = "2024"
+
+# Cloud object storage transport — S3, Azure Blob, Google Cloud Storage.
+# Uses the `object_store` crate for a unified API across all three providers.
+
+[dependencies]
+potato-etl-common = { workspace = true }
+object_store      = { workspace = true }
+futures           = { workspace = true }
+async-trait       = { workspace = true }
+anyhow            = { workspace = true }
+tracing           = { workspace = true }

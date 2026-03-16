@@ -1,0 +1,15 @@
+[package]
+name    = "potato-etl-transport-ftp"
+version = "0.1.0"
+edition = "2024"
+
+# FTP / FTPS file transport.
+# Uses the `suppaftp` crate for async FTP with optional TLS.
+
+[dependencies]
+potato-etl-common = { workspace = true }
+suppaftp          = { workspace = true }
+tokio             = { workspace = true }
+async-trait       = { workspace = true }
+anyhow            = { workspace = true }
+tracing           = { workspace = true }

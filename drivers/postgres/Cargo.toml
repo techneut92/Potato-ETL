@@ -1,0 +1,21 @@
+[package]
+name    = "potato-etl-driver-postgres"
+version = "0.1.0"
+edition = "2024"
+
+# PostgreSQL driver — pure Rust via sqlx.  No system libraries required.
+
+[dependencies]
+potato-etl-common = { workspace = true }
+arrow        = { workspace = true }
+tokio        = { workspace = true }
+futures      = { workspace = true }
+async-stream = { workspace = true }
+anyhow       = { workspace = true }
+chrono       = { workspace = true }
+tracing      = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+uuid         = { workspace = true }
+
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid", "json", "tls-rustls"] }

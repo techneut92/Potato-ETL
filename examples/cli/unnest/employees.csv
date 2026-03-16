@@ -1,0 +1,11 @@
+id,first_name,last_name,department,salary,start_date,active
+1,Alice,van der Berg,Engineering,75000,2021-03-15,true
+2,Bob,de Vries,Engineering,68000,2022-01-10,true
+3,Charlie,Jansen,Marketing,62000,2020-06-01,true
+4,Diana,Bakker,Engineering,81000,2019-11-20,false
+5,Erik,Smit,Marketing,59000,2023-02-28,true
+6,Fatima,El Amrani,Data,72000,2021-09-01,true
+7,Gert,van Dijk,Data,77000,2020-04-15,true
+8,Hannah,Visser,Marketing,64000,2022-07-01,true
+9,Irene,de Boer,Engineering,79000,2021-01-05,true
+10,Jan,Mulder,Data,71000,2023-06-15,true

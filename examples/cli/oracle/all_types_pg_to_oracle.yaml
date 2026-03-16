@@ -1,0 +1,129 @@
+# examples/cli/oracle/all_types_pg_to_oracle.yaml
+#
+# Cross-database pipeline: read the type_showcase table from Postgres and write
+# it to Oracle via the native-typed OCI binding path.
+#
+# All DML runs in a single Oracle transaction — downstream consumers never see
+# partially loaded data.  The commit happens only at pipeline completion.
+#
+# Postgres type        Arrow DataType             Oracle target type
+# ───────────────────────────────────────────────────────────────────────
+# SERIAL / INTEGER     Int32                      NUMBER(10)
+# BIGINT               Int64                      NUMBER(19)
+# NUMERIC(p,s)         Decimal128(p,s)            NUMBER(p,s)
+# REAL                 Float32                    BINARY_FLOAT
+# DOUBLE PRECISION     Float64                    BINARY_DOUBLE
+# BOOLEAN              Boolean                    NUMBER(1)
+# CHAR(n)              Utf8                       CHAR(n)
+# VARCHAR(n)           Utf8                       VARCHAR2(n)
+# TEXT                 Utf8                       CLOB
+# DATE                 Date32                     DATE
+# TIME                 Time64(Microsecond)        VARCHAR2(15)  (no TIME in Oracle)
+# TIMESTAMP            Timestamp(Microsecond)     TIMESTAMP(6)
+# TIMESTAMPTZ          Timestamp(Microsecond,UTC) TIMESTAMP(6) WITH TIME ZONE
+# UUID                 Utf8                       VARCHAR2(36)
+# JSONB / JSON         Utf8                       CLOB
+# INET                 Utf8                       VARCHAR2(45)
+# MACADDR              Utf8                       VARCHAR2(17)
+# BYTEA                LargeBinary                BLOB
+# TEXT[]               Utf8 (serialised)          CLOB
+#
+# Prerequisites:
+#   - Postgres: seed.sql from examples/cli/postgres/ executed against etl_demo
+#   - Oracle:   Instant Client on LD_LIBRARY_PATH, etl_user with CREATE TABLE
+#
+# Run:
+#   cargo run -p potato-etl-cli --features "postgres oracle" -- run \
+#     --config examples/cli/oracle/all_types_pg_to_oracle.yaml
+#
+# Show Arrow schema of the source:
+#   cargo run -p potato-etl-cli --features postgres -- schema \
+#     --config examples/cli/oracle/all_types_pg_to_oracle.yaml --step src
+
+config:
+  batch_size: 20000
+  log_level: debug
+
+connections:
+  pg:
+    driver: postgres
+    host: localhost
+    port: 5432
+    database: etl_demo
+    auth:
+      type: user_pass
+      username: etl_user
+      password: "etl_pass"
+
+  ora:
+    driver: oracle
+    host: localhost
+    port: 1521
+    service: XEPDB1
+    auth:
+      type: user_pass
+      username: etl_user
+      password: "etl_pass"
+
+steps:
+
+  - id: src
+    type: read_db
+    from:
+      connection: pg
+      table: type_showcase
+      cursor: id
+    schema:
+      arrow:
+        columns:
+          qty:
+            type: int32
+          big_count:
+            type: int64
+          rate:
+            type: float32
+          factor:
+            type: float64
+          is_active:
+            type: boolean
+    options:
+      prefetch_rows: 500
+
+  # Oracle returns UPPERCASE column names by default; lowercasing the Postgres
+  # source columns makes the round-trip consistent if we ever read back.
+  - id: mapped
+    type: map
+    input: src
+    columns:
+      loaded_at: "now()"
+
+  - id: sink
+    type: write_db
+    input: mapped
+    target:
+      connection: ora
+      schema: ETL_USER
+      table: TYPE_SHOWCASE
+    mode: truncate
+    create_table: if_not_exists
+    schema:
+      database:
+        columns:
+          id:
+            primary_key: true
+          col_text:
+            type: CLOB
+          col_json:
+            type: CLOB
+          col_jsonb:
+            type: CLOB
+          col_uuid:
+            type: VARCHAR2(36)
+          col_inet:
+            type: VARCHAR2(45)
+          col_macaddr:
+            type: VARCHAR2(17)
+          col_time:
+            type: VARCHAR2(15)
+          col_array:
+            type: CLOB

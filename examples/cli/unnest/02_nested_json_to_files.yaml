@@ -1,0 +1,159 @@
+# examples/cli/unnest/02_nested_json_to_files.yaml
+#
+# Nested JSON → Normalized CSV + JSON files (no database required)
+#
+# Same input as 01_nested_json_to_normalized_pg.yaml, but writes the
+# normalized tables to local files instead of PostgreSQL.  Useful for
+# testing, prototyping, or feeding into other tools.
+#
+# Produces:
+#
+#   output/candidates.csv              — flat candidate records
+#   output/talent_pools.json           — deduplicated talent pool dimension
+#   output/addresses.csv               — deduplicated address dimension
+#   output/candidate_talent_pools.csv  — junction: candidate ↔ talent pool
+#   output/talent_pool_addresses.csv   — junction: talent pool ↔ address
+#
+# Run:
+#   cargo run -p potato-etl-cli -- run \
+#     --config examples/cli/unnest/02_nested_json_to_files.yaml
+#
+# Dry-run:
+#   cargo run -p potato-etl-cli -- dry-run \
+#     --config examples/cli/unnest/02_nested_json_to_files.yaml --format pretty
+
+config:
+  batch_size: 1000
+  log_level: info
+
+steps:
+
+  # ── SOURCE ──────────────────────────────────────────────────────────────────
+
+  - id: raw
+    type: read_json
+    path: examples/cli/unnest/candidates.json
+    data_path: candidates
+
+  # ── CANDIDATES (flat) ───────────────────────────────────────────────────────
+
+  - id: candidates_flat
+    type: flatten
+    input: raw
+    select:
+      candidate_id: id
+      first_name:   first_name
+      last_name:    last_name
+      email:        email
+      phone:        phone
+      status:       status
+
+  - id: write_candidates
+    type: write_csv
+    input: candidates_flat
+    path: output/candidates.csv
+
+  # ── LEVEL 1 UNNEST: talent_pools ────────────────────────────────────────────
+
+  - id: pools_exploded
+    type: unnest
+    input: raw
+    column: talent_pools
+    parent_fields:
+      candidate_id: id
+    fields:
+      pool_id:        id
+      pool_name:      name
+      pool_priority:  priority
+      pool_addresses: addresses
+
+  # ── JUNCTION: candidate ↔ talent pool ───────────────────────────────────────
+
+  - id: junction_cp
+    type: flatten
+    input: pools_exploded
+    select:
+      candidate_id: candidate_id
+      pool_id:      pool_id
+
+  - id: write_junction_cp
+    type: write_csv
+    input: junction_cp
+    path: output/candidate_talent_pools.csv
+
+  # ── TALENT POOLS (dimension, deduped) → JSON ───────────────────────────────
+
+  - id: pools_dedup
+    type: aggregate
+    input: pools_exploded
+    group_by: [pool_id]
+    metrics:
+      pool_name:     first(pool_name)
+      pool_priority: first(pool_priority)
+
+  - id: pools_renamed
+    type: rename
+    input: pools_dedup
+    columns:
+      pool_id:       id
+      pool_name:     name
+      pool_priority: priority
+
+  - id: write_pools
+    type: write_json
+    input: pools_renamed
+    path: output/talent_pools.json
+    pretty: true
+
+  # ── LEVEL 2 UNNEST: addresses ───────────────────────────────────────────────
+
+  - id: addresses_exploded
+    type: unnest
+    input: pools_exploded
+    column: pool_addresses
+    parent_fields:
+      pool_id: pool_id
+    fields:
+      address_id:   id
+      address_type: type
+      city:         city
+      country:      country
+      postal_code:  postal_code
+
+  # ── JUNCTION: talent pool ↔ address ─────────────────────────────────────────
+
+  - id: junction_pa
+    type: flatten
+    input: addresses_exploded
+    select:
+      pool_id:    pool_id
+      address_id: address_id
+
+  - id: write_junction_pa
+    type: write_csv
+    input: junction_pa
+    path: output/talent_pool_addresses.csv
+
+  # ── ADDRESSES (dimension, deduped) ──────────────────────────────────────────
+
+  - id: addresses_dedup
+    type: aggregate
+    input: addresses_exploded
+    group_by: [address_id]
+    metrics:
+      address_type: first(address_type)
+      city:         first(city)
+      country:      first(country)
+      postal_code:  first(postal_code)
+
+  - id: addresses_renamed
+    type: rename
+    input: addresses_dedup
+    columns:
+      address_id:   id
+      address_type: type
+
+  - id: write_addresses
+    type: write_csv
+    input: addresses_renamed
+    path: output/addresses.csv

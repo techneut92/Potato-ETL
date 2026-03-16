@@ -1,0 +1,84 @@
+# examples/cli/rest_api/01_github_issues.yaml
+#
+# Fetch GitHub issues via the REST API (Link-header pagination),
+# flatten the nested `user` struct, and write to a Postgres staging table.
+#
+# Auth: set GITHUB_TOKEN in your environment or replace the placeholder.
+#
+# Run:
+#   GITHUB_TOKEN=ghp_... cargo run -p potato-etl-cli --features postgres -- run \
+#     --config examples/cli/rest_api/01_github_issues.yaml
+#
+# Validate (no connection):
+#   cargo run -p potato-etl-cli -- validate \
+#     --config examples/cli/rest_api/01_github_issues.yaml
+
+config:
+  batch_size: 100
+  log_level: info
+
+connections:
+  github:
+    driver: rest_api
+    base_url: "https://api.github.com"
+    auth:
+      type: bearer
+      token: "${GITHUB_TOKEN}"
+    headers:
+      Accept: "application/vnd.github.v3+json"
+      X-GitHub-Api-Version: "2022-11-28"
+    timeout_secs: 30
+    rate_limit_rps: 10.0
+
+  pg:
+    driver: postgres
+    host: localhost
+    port: 5432
+    database: etl_demo
+    auth:
+      type: user_pass
+      username: etl_user
+      password: "etl_pass"
+
+steps:
+
+  # Fetch all open issues — GitHub returns a JSON array at the top level
+  - id: issues_raw
+    type: rest_api
+    conn: github
+    url: /repos/potatoflow/potatoflow/issues
+    data_path: null               # top-level array (no wrapping key)
+    pagination:
+      strategy: link_header       # GitHub uses RFC 5988 Link: <url>; rel="next"
+      page_size: 100
+    # Only open issues (state=open is the API default; add params for closed)
+
+  # Flatten: extract scalar fields we care about from the nested response
+  - id: issues_flat
+    type: flatten
+    input: issues_raw
+    select:
+      issue_id:     id
+      number:       number
+      title:        title
+      state:        state
+      author:       user.login        # nested object traversal
+      label_count:  labels            # array → kept as Utf8 JSON string
+      comments:     comments
+      created_at:   created_at
+      updated_at:   updated_at
+      closed_at:    closed_at
+
+  - id: out
+    type: write_db
+    input: issues_flat
+    target:
+      connection: pg
+      table: github_issues
+    mode: upsert
+    create_table: if_not_exists
+    schema:
+      database:
+        columns:
+          issue_id:
+            primary_key: true

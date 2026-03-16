@@ -1,0 +1,137 @@
+[package]
+name    = "potato-etl-runtime"
+version = "0.1.0"
+edition = "2024"
+
+# Core orchestration crate — DAG executor + unified ReadDB/WriteDB/Scd2Sink.
+# (Package renamed from potato-etl-core to potato-etl-runtime.)
+#
+# Re-exports everything from potato-etl-common so the public API
+# (`potato_etl_runtime::Dag`, `potato_etl_runtime::ReadDB`, etc.) is unchanged.
+#
+# Driver crates and transport crates are optional dependencies,
+# activated by feature flags.
+
+[dependencies]
+# Foundation — all shared types, schema, config, transforms, utils
+potato-etl-common = { workspace = true }
+
+# Base dependencies (needed by DAG executor)
+arrow            = { workspace = true }
+tokio            = { workspace = true }
+futures          = { workspace = true }
+async-stream     = { workspace = true }
+async-trait      = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+serde_yaml_ng    = { workspace = true }
+anyhow           = { workspace = true }
+chrono           = { workspace = true }
+tracing          = { workspace = true }
+tracing-subscriber = { workspace = true }
+indexmap          = { workspace = true }
+reqwest           = { workspace = true }
+base64            = { workspace = true }
+uuid              = { workspace = true }
+dashmap           = { workspace = true }
+
+# ── Optional database driver crates ───────────────────────────────────────────
+
+[dependencies.potato-etl-driver-postgres]
+workspace = true
+optional  = true
+
+[dependencies.potato-etl-driver-mssql]
+workspace = true
+optional  = true
+
+[dependencies.potato-etl-driver-mysql]
+workspace = true
+optional  = true
+
+[dependencies.potato-etl-driver-oracle]
+workspace = true
+optional  = true
+
+[dependencies.potato-etl-driver-databricks]
+workspace = true
+optional  = true
+
+# ── Optional file transport crates ────────────────────────────────────────────
+
+[dependencies.potato-etl-transport-cloud]
+workspace = true
+optional  = true
+
+[dependencies.potato-etl-transport-sftp]
+workspace = true
+optional  = true
+
+[dependencies.potato-etl-transport-ftp]
+workspace = true
+optional  = true
+
+[dependencies.potato-etl-transport-sharepoint]
+workspace = true
+optional  = true
+
+[dependencies.potato-etl-transport-smb]
+workspace = true
+optional  = true
+
+# ── Features ──────────────────────────────────────────────────────────────────
+
+[features]
+default = []
+
+# Everything: all database drivers + all file transports.
+all = [
+    "postgres", "oracle", "mssql", "mssql-bcp", "mssql-odbc",
+    "mysql", "databricks", "databricks-odbc", "databricks-thrift",
+    "transport-cloud", "transport-sftp", "transport-ftp",
+    "transport-sharepoint", "transport-smb",
+]
+
+# ── Database drivers ─────────────────────────────────────────────────────────
+
+# PostgreSQL — pure Rust via sqlx.  No system libraries required.
+postgres   = ["dep:potato-etl-driver-postgres"]
+
+# Oracle — requires Oracle Instant Client.
+oracle     = ["dep:potato-etl-driver-oracle"]
+
+# SQL Server — pure Rust via tiberius.
+mssql      = ["dep:potato-etl-driver-mssql"]
+# MSSQL + bcp subprocess loader (requires mssql-tools18).
+mssql-bcp  = ["mssql", "potato-etl-driver-mssql/bcp"]
+# MSSQL + ODBC write path (requires unixODBC + MS ODBC Driver 18).
+mssql-odbc = ["mssql", "potato-etl-driver-mssql/odbc"]
+
+# MySQL, Aurora, MariaDB — pure Rust via sqlx.
+mysql      = ["dep:potato-etl-driver-mysql"]
+
+# Databricks SQL warehouse via REST SQL Statement API.
+databricks = ["dep:potato-etl-driver-databricks"]
+# Databricks + ODBC read path (requires Simba driver).
+databricks-odbc   = ["databricks", "potato-etl-driver-databricks/odbc"]
+# Databricks + Thrift binary protocol (high-perf large datasets).
+databricks-thrift = ["databricks", "potato-etl-driver-databricks/thrift"]
+
+# ── File transports ──────────────────────────────────────────────────────────
+
+# S3 / Azure Blob / Google Cloud Storage via object_store.
+transport-cloud      = ["dep:potato-etl-transport-cloud"]
+# SFTP via russh.
+transport-sftp       = ["dep:potato-etl-transport-sftp"]
+# FTP / FTPS via suppaftp.
+transport-ftp        = ["dep:potato-etl-transport-ftp"]
+# SharePoint Online via MS Graph API.
+transport-sharepoint = ["dep:potato-etl-transport-sharepoint"]
+# SMB / CIFS via pavao.
+transport-smb        = ["dep:potato-etl-transport-smb"]
+
+# All file transports combined.
+transport-all = [
+    "transport-cloud", "transport-sftp", "transport-ftp",
+    "transport-sharepoint", "transport-smb",
+]

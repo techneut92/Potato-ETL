@@ -1,0 +1,43 @@
+# examples/cli/mssql/01_copy.yaml
+#
+# Read all employees from MSSQL dbo.employees, write to dbo.employees_active.
+#
+# Run:
+#   cargo run -p potato-etl-cli --features mssql -- run \
+#     --config examples/cli/mssql/01_copy.yaml
+
+config:
+  batch_size: 500
+  log_level: info
+
+connections:
+  mssql:
+    driver: mssql
+    host: localhost
+    port: 1433
+    database: etl_demo
+    auth:
+      type: user_pass
+      username: sa
+      password: "YourPassword1!"
+
+steps:
+
+  - id: src
+    type: read_db
+    from:
+      connection: mssql
+      schema: dbo
+      table: employees
+      cursor: id
+    normalize_columns: true       # MSSQL column names are already lowercase here,
+                                  # but this flag is a no-op when they already are
+
+  - id: out
+    type: write_db
+    input: src
+    target:
+      connection: mssql
+      schema: dbo
+      table: employees_active
+    mode: truncate

@@ -1,0 +1,14 @@
+[build-system]
+requires      = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name            = "potato_etl"
+version         = "0.1.0"
+requires-python = ">=3.9"
+dependencies    = ["pyarrow>=14"]
+
+[tool.maturin]
+module-name   = "potato_etl"
+manifest-path = "Cargo.toml"
+features      = ["pyo3/extension-module"]

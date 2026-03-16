@@ -1,0 +1,112 @@
+{
+  "candidates": [
+    {
+      "id": 1001,
+      "first_name": "Alice",
+      "last_name": "van der Berg",
+      "email": "alice@example.com",
+      "phone": "+31612345678",
+      "status": "active",
+      "talent_pools": [
+        {
+          "id": "tp-engineering",
+          "name": "Engineering",
+          "priority": "high",
+          "addresses": [
+            { "id": "addr-001", "type": "office", "city": "Amsterdam", "country": "NL", "postal_code": "1012AB" },
+            { "id": "addr-002", "type": "remote", "city": "Utrecht",   "country": "NL", "postal_code": "3511EP" }
+          ]
+        },
+        {
+          "id": "tp-data",
+          "name": "Data & Analytics",
+          "priority": "medium",
+          "addresses": [
+            { "id": "addr-003", "type": "office", "city": "Rotterdam", "country": "NL", "postal_code": "3011AD" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 1002,
+      "first_name": "Bob",
+      "last_name": "de Vries",
+      "email": "bob@example.com",
+      "phone": "+31687654321",
+      "status": "active",
+      "talent_pools": [
+        {
+          "id": "tp-engineering",
+          "name": "Engineering",
+          "priority": "high",
+          "addresses": [
+            { "id": "addr-001", "type": "office", "city": "Amsterdam", "country": "NL", "postal_code": "1012AB" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 1003,
+      "first_name": "Charlie",
+      "last_name": "Jansen",
+      "email": "charlie@example.com",
+      "phone": "+31698765432",
+      "status": "inactive",
+      "talent_pools": [
+        {
+          "id": "tp-data",
+          "name": "Data & Analytics",
+          "priority": "medium",
+          "addresses": [
+            { "id": "addr-003", "type": "office", "city": "Rotterdam", "country": "NL", "postal_code": "3011AD" },
+            { "id": "addr-004", "type": "branch", "city": "Den Haag",  "country": "NL", "postal_code": "2511AA" }
+          ]
+        },
+        {
+          "id": "tp-management",
+          "name": "Management & Leadership",
+          "priority": "low",
+          "addresses": [
+            { "id": "addr-005", "type": "hq", "city": "Eindhoven", "country": "NL", "postal_code": "5611AA" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 1004,
+      "first_name": "Diana",
+      "last_name": "Bakker",
+      "email": "diana@example.com",
+      "phone": "+31676543210",
+      "status": "active",
+      "talent_pools": []
+    },
+    {
+      "id": 1005,
+      "first_name": "Erik",
+      "last_name": "Smit",
+      "email": "erik@example.com",
+      "phone": null,
+      "status": "active",
+      "talent_pools": [
+        {
+          "id": "tp-engineering",
+          "name": "Engineering",
+          "priority": "high",
+          "addresses": [
+            { "id": "addr-001", "type": "office", "city": "Amsterdam", "country": "NL", "postal_code": "1012AB" },
+            { "id": "addr-006", "type": "co-work", "city": "Groningen", "country": "NL", "postal_code": "9711LM" }
+          ]
+        },
+        {
+          "id": "tp-management",
+          "name": "Management & Leadership",
+          "priority": "low",
+          "addresses": [
+            { "id": "addr-005", "type": "hq", "city": "Eindhoven", "country": "NL", "postal_code": "5611AA" }
+          ]
+        }
+      ]
+    }
+  ]
+}

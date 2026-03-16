@@ -1,0 +1,15 @@
+[package]
+name    = "potato-etl-transport-smb"
+version = "0.1.0"
+edition = "2024"
+
+# SMB / CIFS file transport — read/write files on Windows file shares.
+# Uses the `pavao` crate for SMB client operations (libsmbclient bindings).
+
+[dependencies]
+potato-etl-common = { workspace = true }
+pavao             = { workspace = true }
+tokio             = { workspace = true }
+async-trait       = { workspace = true }
+anyhow            = { workspace = true }
+tracing           = { workspace = true }

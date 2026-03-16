@@ -1,0 +1,158 @@
+# examples/cli/rest_api/03_afas_scd2.yaml
+#
+# AFAS Profit → PostgreSQL SCD Type 2
+#
+# Reads AFAS HrEmployees via the REST connector, renames AFAS field codes to
+# human-readable columns in one step, and builds a full change-history table.
+#
+# On every run the SCD2 sink:
+#   • inserts a new version when salary, department, or employment type changed
+#   • expires the old row: valid_to = now(), is_current = false
+#   • leaves unchanged employees untouched
+#
+# Auth: base64-encode your AFAS token:
+#   echo -n ':your_afas_api_token' | base64
+# Then set AFAS_TOKEN="AfasToken <base64_result>"
+#
+# Run:
+#   AFAS_TOKEN="AfasToken ..." cargo run -p potato-etl-cli --features postgres -- run \
+#     --config examples/cli/rest_api/03_afas_scd2.yaml
+#
+# Dry-run (no DB writes):
+#   cargo run -p potato-etl-cli --features postgres -- dry-run \
+#     --config examples/cli/rest_api/03_afas_scd2.yaml --format pretty
+
+config:
+  batch_size: 100
+  log_level: info
+
+connections:
+  afas:
+    driver: rest_api
+    base_url: "https://12345.afas.online/profitrestservices"
+    auth:
+      type: api_key
+      header: Authorization
+      key: "${AFAS_TOKEN}"
+    headers:
+      Accept: "application/json"
+    timeout_secs: 30
+    rate_limit_rps: 5.0
+
+  pg:
+    driver: postgres
+    host: localhost
+    port: 5432
+    database: etl_demo
+    auth:
+      type: user_pass
+      username: etl_user
+      password: "etl_pass"
+    options:
+      ssl: require
+
+steps:
+
+  # ── Source: AFAS HrEmployees GET connector ────────────────────────────────────
+  #
+  # schema.arrow.columns: cast AFAS fields to the correct Arrow types.
+  # The key is the AFAS (source) field code.
+  - id: employees_raw
+    type: rest_api
+    conn: afas
+    url: /connectors/HrEmployees
+    data_path: rows
+    pagination:
+      strategy: offset
+      offset_param: skip
+      limit_param: take
+      page_size: 100
+    schema:
+      arrow:
+        columns:
+          EmId:
+            type: utf8
+          FiNm:
+            type: utf8
+          LaNm:
+            type: utf8
+          EmAd:
+            type: utf8
+          SaSa:
+            type: float64
+          DpId:
+            type: utf8
+          DpNm:
+            type: utf8
+          FtId:
+            type: utf8
+          HiDa:
+            type: date32
+          MaId:
+            type: utf8
+
+  # ── Rename: AFAS field codes → human-readable names ───────────────────────────
+  - id: employees
+    type: rename
+    input: employees_raw
+    columns:
+      EmId: employee_id
+      FiNm: first_name
+      LaNm: last_name
+      EmAd: email
+      SaSa: salary
+      DpId: department_code
+      DpNm: department_name
+      FtId: employment_type
+      HiDa: hire_date
+      MaId: manager_id
+
+  # ── Sink: SCD2 history in Postgres ──────────────────────────────────────────
+  - id: employees_history
+    type: scd2_sink
+    input: employees
+    target:
+      connection: pg
+      schema: hr
+      table: employees_history
+    key: employee_id
+    track:
+      - salary
+      - department_code
+      - employment_type
+    create_table: if_not_exists
+    # System columns: valid_from, valid_to, is_current, scd_id (defaults)
+    schema:
+      database:
+        columns:
+          employee_id:
+            type: "VARCHAR(50)"
+            nullable: false
+            primary_key: true
+            description: "AFAS employee number"
+          first_name:
+            type: "VARCHAR(100)"
+            nullable: false
+          last_name:
+            type: "VARCHAR(100)"
+            nullable: false
+          email:
+            type: "VARCHAR(255)"
+            unique: true
+          salary:
+            type: "NUMERIC(12,2)"
+            check_expr: "salary >= 0"
+            default_expr: "0.00"
+            description: "Monthly gross salary"
+          department_code:
+            type: "VARCHAR(50)"
+          department_name:
+            type: "VARCHAR(150)"
+          employment_type:
+            type: "VARCHAR(10)"
+            description: "FT = full-time, PT = part-time"
+          hire_date:
+            type: "DATE"
+            nullable: false
+          manager_id:
+            type: "VARCHAR(50)"

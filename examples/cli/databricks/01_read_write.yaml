@@ -1,0 +1,70 @@
+# examples/cli/databricks/01_read_write.yaml
+#
+# Read a Delta table from a Databricks SQL warehouse, compute a derived column,
+# and write the result back to another table in the same warehouse.
+#
+# No extra system libraries required — uses reqwest (already a dependency).
+# Needs the `databricks` feature flag.
+#
+# Run:
+#   DATABRICKS_TOKEN=dapi... cargo run -p potato-etl-cli --features databricks -- run \
+#     --config examples/cli/databricks/01_read_write.yaml
+#
+# Validate (no connection):
+#   cargo run -p potato-etl-cli -- validate \
+#     --config examples/cli/databricks/01_read_write.yaml
+
+config:
+  batch_size: 10000              # Databricks performs well with large batches
+  log_level: info
+
+connections:
+  dbx:
+    driver: databricks
+    host: adb-1234567890123456.4.azuredatabricks.net
+    http_path: /sql/1.0/warehouses/abc123def456
+    auth:
+      type: pat
+      token: "${DATABRICKS_TOKEN}"
+    options:
+      catalog: main              # Unity Catalog catalog
+      schema: analytics          # default schema
+
+steps:
+
+  - id: src
+    type: read_db
+    from:
+      connection: dbx
+      table: employees
+      cursor: id
+
+  - id: active
+    type: filter
+    input: src
+    condition: "status == \"active\""
+
+  - id: enriched
+    type: map
+    input: active
+    columns:
+      bonus:    "salary * 0.10"
+      load_ts:  "now()"
+
+  - id: by_dept
+    type: aggregate
+    input: enriched
+    group_by: [department_id]
+    metrics:
+      headcount:    count()
+      avg_salary:   avg(salary)
+      total_bonus:  sum(bonus)
+
+  - id: out
+    type: write_db
+    input: by_dept
+    target:
+      connection: dbx
+      table: dept_payroll_summary
+    mode: truncate
+    create_table: if_not_exists

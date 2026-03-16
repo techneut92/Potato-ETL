@@ -1,0 +1,115 @@
+# examples/cli/multi_source/pipeline.yaml
+#
+# Multi-source join: Postgres employees ⟕ MSSQL departments → Postgres output
+#
+# Shows:
+#   • Two named connections to different database engines
+#   • Hash join on department_id
+#   • Bonus computation after the join
+#   • Upsert into a Postgres target
+#
+# Seed both databases first:
+#   psql -U etl_user -d etl_demo -f examples/cli/multi_source/seed_pg.sql
+#   sqlcmd -S localhost -U sa -P 'YourPassword1!' -d etl_demo \
+#          -i examples/cli/multi_source/seed_mssql.sql
+#
+# Run (both engines enabled):
+#   cargo run -p potato-etl-cli --features postgres,mssql -- run \
+#     --config examples/cli/multi_source/pipeline.yaml
+#
+# Validate (no connection):
+#   cargo run -p potato-etl-cli -- validate \
+#     --config examples/cli/multi_source/pipeline.yaml
+#
+# Static explanation of every step:
+#   cargo run -p potato-etl-cli -- explain \
+#     --config examples/cli/multi_source/pipeline.yaml
+
+config:
+  batch_size: 500
+  log_level: info
+
+connections:
+  pg:
+    driver: postgres
+    host: localhost
+    port: 5432
+    database: etl_demo
+    auth:
+      type: user_pass
+      username: etl_user
+      password: "etl_pass"
+
+  mssql:
+    driver: mssql
+    host: localhost
+    port: 1433
+    database: etl_demo
+    auth:
+      type: user_pass
+      username: sa
+      password: "YourPassword1!"
+
+steps:
+
+  # ── Sources ───────────────────────────────────────────────────────────────────
+
+  - id: employees
+    type: read_db
+    from:
+      connection: pg
+      table: employees
+      cursor: id
+    schema:
+      arrow:
+        columns:
+          salary:
+            type: float64
+
+  # Right side of the join: departments from MSSQL.
+  # The join step fully buffers the right side in memory, so keep it smaller.
+  - id: departments
+    type: read_db
+    from:
+      connection: mssql
+      schema: dbo
+      table: departments
+    normalize_columns: true
+
+  # ── Transforms ───────────────────────────────────────────────────────────────
+
+  - id: active
+    type: filter
+    input: employees
+    condition: "status == \"active\""
+
+  # Hash join: active employees (left) + departments (right) on department_id
+  - id: joined
+    type: join
+    left: active
+    right: departments
+    on: department_id             # column must exist in both tables with the same name
+    how: inner
+
+  - id: enriched
+    type: map
+    input: joined
+    columns:
+      bonus:    "salary * 0.10"
+      load_ts:  "now()"
+
+  # ── Sink ─────────────────────────────────────────────────────────────────────
+
+  - id: out
+    type: write_db
+    input: enriched
+    target:
+      connection: pg
+      table: employees_enriched
+    mode: upsert
+    create_table: if_not_exists
+    schema:
+      database:
+        columns:
+          id:
+            primary_key: true

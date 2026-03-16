@@ -1,0 +1,47 @@
+# examples/cli/postgres/01_copy.yaml
+#
+# Simplest possible pipeline: read all employees, write to a copy table.
+# Good starting point for testing a new connection.
+#
+# Run:
+#   cargo run -p potato-etl-cli --features postgres -- run \
+#     --config examples/cli/postgres/01_copy.yaml
+#
+# Validate (no DB needed):
+#   cargo run -p potato-etl-cli -- validate \
+#     --config examples/cli/postgres/01_copy.yaml
+#
+# Preview (1 batch, no writes committed):
+#   cargo run -p potato-etl-cli --features postgres -- dry-run \
+#     --config examples/cli/postgres/01_copy.yaml --format pretty
+
+config:
+  batch_size: 500
+  log_level: info
+
+connections:
+  pg:
+    driver: postgres
+    host: localhost
+    port: 5432
+    database: etl_demo
+    auth:
+      type: user_pass
+      username: etl_user
+      password: "etl_pass"
+
+steps:
+  - id: src
+    type: read_db
+    from:
+      connection: pg
+      table: employees
+      cursor: id                  # keyset pagination — safe for large tables
+
+  - id: out
+    type: write_db
+    input: src
+    target:
+      connection: pg
+      table: employees_active
+    mode: truncate                # wipe and reload on every run

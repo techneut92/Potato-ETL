@@ -1,0 +1,73 @@
+# examples/cli/rest_api/02_cursor_pagination.yaml
+#
+# Cursor-based pagination example — suitable for APIs that return an opaque
+# "next cursor" token in the response body (Stripe, Salesforce, Intercom, …).
+#
+# Pattern:
+#   GET /v1/customers?limit=100
+#   → { "data": [...], "meta": { "next_cursor": "tok_abc123", "has_more": true } }
+#   GET /v1/customers?limit=100&cursor=tok_abc123
+#   → { "data": [...], "meta": { "has_more": false } }
+#
+# Run:
+#   API_KEY=sk-live-... cargo run -p potato-etl-cli --features postgres -- run \
+#     --config examples/cli/rest_api/02_cursor_pagination.yaml
+
+config:
+  batch_size: 100
+  log_level: info
+
+connections:
+  my_api:
+    driver: rest_api
+    base_url: "https://api.example.com"
+    auth:
+      type: bearer
+      token: "${API_KEY}"
+    headers:
+      Accept: "application/json"
+    timeout_secs: 30
+    rate_limit_rps: 20.0
+
+  pg:
+    driver: postgres
+    host: localhost
+    port: 5432
+    database: etl_demo
+    auth:
+      type: user_pass
+      username: etl_user
+      password: "etl_pass"
+
+steps:
+
+  - id: customers
+    type: rest_api
+    conn: my_api
+    url: /v1/customers
+    data_path: data               # records are under the "data" key
+    pagination:
+      strategy: cursor
+      cursor_path: "meta.next_cursor"   # dot-path into the response JSON
+      cursor_param: cursor              # query parameter name for next request
+      has_more_path: "meta.has_more"   # stop when this is false / absent
+      page_size: 100
+
+  - id: active_customers
+    type: filter
+    input: customers
+    condition: "status == \"active\""
+
+  - id: out
+    type: write_db
+    input: active_customers
+    target:
+      connection: pg
+      table: customers_synced
+    mode: upsert
+    create_table: if_not_exists
+    schema:
+      database:
+        columns:
+          id:
+            primary_key: true

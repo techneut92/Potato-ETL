@@ -1,0 +1,312 @@
+# examples/cli/unnest/01_nested_json_to_normalized_pg.yaml
+#
+# Nested JSON → Normalized PostgreSQL (3-level deep unnest)
+#
+# Reads a JSON file with candidates, each containing a nested array of
+# talent_pools, each of which contains a nested array of addresses.
+#
+# Produces five tables:
+#
+#   candidates              (SCD2)  — full change history per candidate
+#   talent_pools            (upsert) — deduplicated talent pool dimension
+#   addresses               (upsert) — deduplicated address dimension
+#   candidate_talent_pools  (upsert) — junction: candidate ↔ talent pool
+#   talent_pool_addresses   (upsert) — junction: talent pool ↔ address
+#
+# Input structure:
+#
+#   candidate
+#     ├── id, first_name, last_name, email, phone, status
+#     └── talent_pools[]
+#           ├── id, name, priority
+#           └── addresses[]
+#                 └── id, type, city, country, postal_code
+#
+# Run:
+#   cargo run -p potato-etl-cli --features postgres -- run \
+#     --config examples/cli/unnest/01_nested_json_to_normalized_pg.yaml
+#
+# Dry-run (inspect schemas, no DB writes):
+#   cargo run -p potato-etl-cli --features postgres -- dry-run \
+#     --config examples/cli/unnest/01_nested_json_to_normalized_pg.yaml --format pretty
+
+config:
+  batch_size: 1000
+  log_level: info
+
+connections:
+  pg:
+    driver: postgres
+    host: localhost
+    port: 5432
+    database: testdb
+    auth:
+      type: user_pass
+      username: testdb
+      password: "TestPassword123!"
+    options:
+      ssl: require
+
+steps:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  #  SOURCE: read the nested JSON file
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - id: raw
+    type: read_json
+    path: examples/cli/unnest/candidates.json
+    data_path: candidates
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  #  TABLE 1: candidates (SCD2 — track status, email, phone changes)
+  # ═══════════════════════════════════════════════════════════════════════════
+  #
+  # SCD2 keeps full change history: when status/email/phone changes, the old
+  # row gets valid_to = now() + is_current = false, and a new version is
+  # inserted with valid_from = now() + is_current = true.
+
+  - id: candidates_flat
+    type: flatten
+    input: raw
+    select:
+      candidate_id: id
+      first_name:   first_name
+      last_name:    last_name
+      email:        email
+      phone:        phone
+      status:       status
+
+  - id: write_candidates
+    type: scd2_sink
+    input: candidates_flat
+    target:
+      connection: pg
+      schema: public
+      table: candidates
+    key: candidate_id
+    track:
+      - email
+      - phone
+      - status
+    create_table: if_not_exists
+    schema:
+      arrow:
+        columns:
+          candidate_id:
+            type: int64              # flatten produces Utf8 from JSON — cast to Int64
+                                     # DDL auto-translates: Int64 → BIGINT, Utf8 → TEXT
+
+  # ══════════════════════════════════════════════════════════════════════════
+  #  LEVEL 1 UNNEST: candidate → talent_pools[]
+  # ═══════════════════════════════════════════════════════════════════════════
+  #
+  # Explodes talent_pools array.  Each element becomes a row carrying
+  # the parent candidate_id + talent pool fields.
+  #
+  # Input:  { id: 1001, ..., talent_pools: [{id: "tp-eng", ...}, ...] }
+  # Output: candidate_id | pool_id | pool_name | pool_priority | talent_pools_addresses
+  #         (one row per talent pool per candidate)
+
+  - id: pools_exploded
+    type: unnest
+    input: raw
+    column: talent_pools
+    parent_fields:
+      candidate_id: id
+    fields:
+      pool_id:       id
+      pool_name:     name
+      pool_priority: priority
+      pool_addresses: addresses       # carry the nested addresses array through
+
+  # ── TABLE 2: candidate_talent_pools (junction) ────────────────────────────
+
+  - id: junction_candidate_pool
+    type: flatten
+    input: pools_exploded
+    select:
+      candidate_id: candidate_id
+      pool_id:      pool_id
+
+  - id: write_candidate_pools
+    type: write_db
+    input: junction_candidate_pool
+    target:
+      connection: pg
+      schema: public
+      table: candidate_talent_pools
+    mode: upsert
+    create_table: if_not_exists
+    schema:
+      arrow:
+        columns:
+          candidate_id:
+            type: int64              # unnest produces Utf8 — cast back to Int64 for INTEGER column
+      database:
+        columns:
+          candidate_id:
+            type: "INTEGER"
+            nullable: false
+            primary_key: true          # part of composite PK — also used as upsert key
+            # Note: no FK to candidates — SCD2 PK is scd_id, not candidate_id
+          pool_id:
+            type: "VARCHAR(50)"
+            nullable: false
+            primary_key: true          # part of composite PK — also used as upsert key
+            foreign_key:
+              table: talent_pools
+              column: id
+        constraints:
+          pk_candidate_pool:
+            type: primary_key
+            columns: [candidate_id, pool_id]
+
+  # ── TABLE 3: talent_pools (dimension, deduplicated) ───────────────────────
+
+  - id: pools_dedup
+    type: aggregate
+    input: pools_exploded
+    group_by: [pool_id]
+    metrics:
+      pool_name:     first(pool_name)
+      pool_priority: first(pool_priority)
+
+  - id: pools_renamed
+    type: rename
+    input: pools_dedup
+    columns:
+      pool_id:       id
+      pool_name:     name
+      pool_priority: priority
+
+  - id: write_talent_pools
+    type: write_db
+    input: pools_renamed
+    target:
+      connection: pg
+      schema: public
+      table: talent_pools
+    mode: upsert
+    create_table: if_not_exists
+    schema:
+      database:
+        columns:
+          id:
+            type: "VARCHAR(50)"
+            nullable: false
+            primary_key: true
+          name:
+            type: "VARCHAR(150)"
+            nullable: false
+          priority:
+            type: "VARCHAR(20)"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  #  LEVEL 2 UNNEST: talent_pools → addresses[]
+  # ══════════════════════════════════════════════════════════════════════════
+  #
+  # Takes the pool_addresses JSON string from the level-1 unnest and
+  # explodes it again, carrying the pool_id as parent.
+  #
+  # Input:  pool_id | pool_addresses: '[{"id":"addr-001","city":"Amsterdam",...},...]'
+  # Output: pool_id | address_id | address_type | city | country | postal_code
+
+  - id: addresses_exploded
+    type: unnest
+    input: pools_exploded
+    column: pool_addresses
+    parent_fields:
+      pool_id: pool_id
+    fields:
+      address_id:   id
+      address_type: type
+      city:         city
+      country:      country
+      postal_code:  postal_code
+
+  # ── TABLE 4: talent_pool_addresses (junction) ────────────────────────────
+
+  - id: junction_pool_address
+    type: flatten
+    input: addresses_exploded
+    select:
+      pool_id:    pool_id
+      address_id: address_id
+
+  - id: write_pool_addresses
+    type: write_db
+    input: junction_pool_address
+    target:
+      connection: pg
+      schema: public
+      table: talent_pool_addresses
+    mode: upsert
+    create_table: if_not_exists
+    schema:
+      database:
+        columns:
+          pool_id:
+            type: "VARCHAR(50)"
+            nullable: false
+            primary_key: true          # part of composite PK — also used as upsert key
+            foreign_key:
+              table: talent_pools
+              column: id
+          address_id:
+            type: "VARCHAR(50)"
+            nullable: false
+            primary_key: true          # part of composite PK — also used as upsert key
+            foreign_key:
+              table: addresses
+              column: id
+        constraints:
+          pk_pool_address:
+            type: primary_key
+            columns: [pool_id, address_id]
+
+  # ── TABLE 5: addresses (dimension, deduplicated) ──────────────────────────
+
+  - id: addresses_dedup
+    type: aggregate
+    input: addresses_exploded
+    group_by: [address_id]
+    metrics:
+      address_type: first(address_type)
+      city:         first(city)
+      country:      first(country)
+      postal_code:  first(postal_code)
+
+  - id: addresses_renamed
+    type: rename
+    input: addresses_dedup
+    columns:
+      address_id:   id
+      address_type: type
+
+  - id: write_addresses
+    type: write_db
+    input: addresses_renamed
+    target:
+      connection: pg
+      schema: public
+      table: addresses
+    mode: upsert
+    create_table: if_not_exists
+    schema:
+      database:
+        columns:
+          id:
+            type: "VARCHAR(50)"
+            nullable: false
+            primary_key: true
+          type:
+            type: "VARCHAR(20)"
+          city:
+            type: "VARCHAR(100)"
+            nullable: false
+          country:
+            type: "CHAR(2)"
+            nullable: false
+          postal_code:
+            type: "VARCHAR(10)"

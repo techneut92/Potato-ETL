@@ -1,0 +1,32 @@
+[package]
+name    = "potato-etl-driver-mssql"
+version = "0.1.0"
+edition = "2024"
+
+# SQL Server driver — pure Rust via tiberius (TDS protocol).
+# Optional ODBC write path via `odbc` feature.
+# Optional BCP CLI loader via `bcp` feature.
+
+[dependencies]
+potato-etl-common = { workspace = true }
+arrow        = { workspace = true }
+tokio        = { workspace = true }
+futures      = { workspace = true }
+async-stream = { workspace = true }
+anyhow       = { workspace = true }
+chrono       = { workspace = true }
+tracing      = { workspace = true }
+serde        = { workspace = true }
+uuid         = { workspace = true }
+
+tiberius = { version = "0.12", default-features = false, features = ["tds73", "time", "chrono", "rust_decimal", "rustls"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+rust_decimal = "1"
+
+# ODBC write path (optional)
+odbc-api = { version = "21", optional = true }
+
+[features]
+default = []
+bcp     = []          # Enable BCP CLI bulk loader (requires mssql-tools18 on system)
+odbc    = ["dep:odbc-api"]   # ODBC write path (no KEEPNULLS → SQL Server fills DEFAULTs)

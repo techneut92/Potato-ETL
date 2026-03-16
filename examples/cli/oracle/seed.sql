@@ -1,0 +1,102 @@
+-- Oracle seed for potato_etl oracle examples
+-- Oracle column names are UPPERCASE by default; use normalize_columns: true
+-- in pipeline steps to lowercase them automatically.
+--
+-- Run:
+--   sqlplus etl_user/etl_pass@//localhost:1521/XEPDB1 \
+--     @examples/cli/oracle/seed.sql
+--
+-- With Oracle Instant Client:
+--   sqlplus etl_user/etl_pass@"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=XEPDB1)))" \
+--     @examples/cli/oracle/seed.sql
+
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE ORDERS      PURGE'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE EMPLOYEES   PURGE'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE DEPARTMENTS PURGE'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE EMPLOYEES_ACTIVE  PURGE'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+BEGIN EXECUTE IMMEDIATE 'DROP TABLE EMPLOYEES_HISTORY PURGE'; EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+
+-- ── DEPARTMENTS ───────────────────────────────────────────────────────────────
+
+CREATE TABLE DEPARTMENTS (
+    ID    NUMBER         GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    CODE  VARCHAR2(10)   NOT NULL,
+    NAME  VARCHAR2(150)  NOT NULL
+);
+
+INSERT INTO DEPARTMENTS (CODE, NAME) VALUES ('ENG',  'Engineering');
+INSERT INTO DEPARTMENTS (CODE, NAME) VALUES ('MKT',  'Marketing');
+INSERT INTO DEPARTMENTS (CODE, NAME) VALUES ('HR',   'Human Resources');
+INSERT INTO DEPARTMENTS (CODE, NAME) VALUES ('FIN',  'Finance');
+INSERT INTO DEPARTMENTS (CODE, NAME) VALUES ('OPS',  'Operations');
+COMMIT;
+
+-- ── EMPLOYEES ─────────────────────────────────────────────────────────────────
+-- Oracle DATE includes a time component (HH:MM:SS) — mapped to Arrow Timestamp.
+-- Oracle NUMBER(p,0) maps to Int64; NUMBER(p,s>0) maps to Float64.
+
+CREATE TABLE EMPLOYEES (
+    ID            NUMBER        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    DEPARTMENT_ID NUMBER        NOT NULL,
+    NAME          VARCHAR2(200) NOT NULL,
+    EMAIL         VARCHAR2(255) NOT NULL,
+    STATUS        VARCHAR2(20)  DEFAULT 'active' NOT NULL,
+    SALARY        NUMBER(12,2)  NOT NULL,
+    HIRE_DATE     DATE          NOT NULL,
+    LAST_LOGIN    TIMESTAMP WITH TIME ZONE,
+    IS_MANAGER    NUMBER(1)     DEFAULT 0 NOT NULL,  -- 1 = true, 0 = false
+    CREATED_AT    TIMESTAMP     DEFAULT SYSTIMESTAMP NOT NULL
+);
+
+INSERT INTO EMPLOYEES (DEPARTMENT_ID, NAME, EMAIL, STATUS, SALARY, HIRE_DATE, IS_MANAGER)
+VALUES (1, 'Alice de Vries',  'alice@example.com',  'active',   85000, DATE '2019-03-15', 1);
+INSERT INTO EMPLOYEES (DEPARTMENT_ID, NAME, EMAIL, STATUS, SALARY, HIRE_DATE, IS_MANAGER)
+VALUES (1, 'Bob Janssen',     'bob@example.com',    'active',   78000, DATE '2020-06-01', 0);
+INSERT INTO EMPLOYEES (DEPARTMENT_ID, NAME, EMAIL, STATUS, SALARY, HIRE_DATE, IS_MANAGER)
+VALUES (2, 'Carol Smit',      'carol@example.com',  'active',   65000, DATE '2021-01-10', 1);
+INSERT INTO EMPLOYEES (DEPARTMENT_ID, NAME, EMAIL, STATUS, SALARY, HIRE_DATE, IS_MANAGER)
+VALUES (1, 'David van Dam',   'david@example.com',  'inactive', 72000, DATE '2018-11-20', 0);
+INSERT INTO EMPLOYEES (DEPARTMENT_ID, NAME, EMAIL, STATUS, SALARY, HIRE_DATE, IS_MANAGER)
+VALUES (3, 'Eva Bakker',      'eva@example.com',    'active',   60000, DATE '2022-04-05', 0);
+INSERT INTO EMPLOYEES (DEPARTMENT_ID, NAME, EMAIL, STATUS, SALARY, HIRE_DATE, IS_MANAGER)
+VALUES (1, 'Grace Visser',    'grace@example.com',  'active',   92000, DATE '2016-07-22', 1);
+INSERT INTO EMPLOYEES (DEPARTMENT_ID, NAME, EMAIL, STATUS, SALARY, HIRE_DATE, IS_MANAGER)
+VALUES (3, 'Henk de Boer',   'henk@example.com',   'active',   58000, DATE '2023-01-30', 0);
+INSERT INTO EMPLOYEES (DEPARTMENT_ID, NAME, EMAIL, STATUS, SALARY, HIRE_DATE, IS_MANAGER)
+VALUES (1, 'Iris Mulder',     'iris@example.com',   'active',   88000, DATE '2020-09-14', 0);
+COMMIT;
+
+-- ── Target tables ─────────────────────────────────────────────────────────────
+
+CREATE TABLE EMPLOYEES_ACTIVE (
+    ID            NUMBER,
+    NAME          VARCHAR2(200),
+    EMAIL         VARCHAR2(255),
+    DEPARTMENT_ID NUMBER,
+    SALARY        NUMBER(12,2),
+    HIRE_DATE     DATE,
+    IS_MANAGER    NUMBER(1),
+    BONUS         NUMBER(12,2)
+);
+
+-- SCD2 — is_current: NUMBER(1), 1 = current row, 0 = expired
+CREATE TABLE EMPLOYEES_HISTORY (
+    SCD_ID     NUMBER      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ID         NUMBER      NOT NULL,
+    NAME       VARCHAR2(200),
+    EMAIL      VARCHAR2(255),
+    SALARY     NUMBER(12,2),
+    STATUS     VARCHAR2(20),
+    VALID_FROM TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
+    VALID_TO   TIMESTAMP WITH TIME ZONE,
+    IS_CURRENT NUMBER(1)  DEFAULT 1 NOT NULL
+);
+CREATE INDEX IDX_EMP_HIST_KEY ON EMPLOYEES_HISTORY (ID, IS_CURRENT);
+
+SELECT 'Oracle seed complete: ' || COUNT(*) || ' employees' AS RESULT FROM EMPLOYEES;
+/

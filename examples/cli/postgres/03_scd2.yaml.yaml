@@ -1,0 +1,70 @@
+# examples/cli/postgres/03_scd2.yaml
+#
+# Slowly-Changing Dimension Type 2 — full salary/status change history.
+#
+# On every run the sink:
+#   1. Inserts a new row when salary, status, or department_id changes.
+#   2. Expires the previous row: valid_to = now(), is_current = false.
+#   3. Leaves unchanged employees untouched.
+#
+# Run once to seed history, then update a salary in the source and re-run to
+# see the new version appear alongside the expired old row.
+#
+#   UPDATE employees SET salary = salary + 5000 WHERE name = 'Alice de Vries';
+#   cargo run -p potato-etl-cli --features postgres -- run \
+#     --config examples/cli/postgres/03_scd2.yaml
+#
+# Step-by-step walkthrough (no DB writes):
+#   cargo run -p potato-etl-cli -- explain \
+#     --config examples/cli/postgres/03_scd2.yaml
+
+config:
+  batch_size: 500
+  log_level: info
+
+connections:
+  pg:
+    driver: postgres
+    host: localhost
+    port: 5432
+    database: etl_demo
+    auth:
+      type: user_pass
+      username: etl_user
+      password: "etl_pass"
+
+steps:
+
+  - id: src
+    type: read_db
+    from:
+      connection: pg
+      table: employees
+      cursor: id
+
+  # Keep only columns we want to track — strip created_at / last_login noise
+  - id: selected
+    type: map
+    input: src
+    columns:
+      id:            id
+      name:          name
+      email:         email
+      salary:        salary
+      status:        status
+    select_only: true
+
+  - id: history
+    type: scd2_sink
+    input: selected
+    target:
+      connection: pg
+      table: employees_history
+    key: id
+    track:
+      - salary
+      - status
+      - name
+    create_table: if_not_exists
+    # System column names match seed.sql:
+    #   valid_from, valid_to, is_current, scd_id  (all defaults — no override needed)

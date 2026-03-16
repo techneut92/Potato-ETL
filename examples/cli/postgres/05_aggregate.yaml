@@ -1,0 +1,66 @@
+# examples/cli/postgres/05_aggregate.yaml
+#
+# Group employees by department and compute payroll statistics.
+# Output lands in dept_salary_summary (seeded by seed.sql).
+#
+# Run:
+#   cargo run -p potato-etl-cli --features postgres -- run \
+#     --config examples/cli/postgres/05_aggregate.yaml
+#
+# Dry-run (reads 1 batch, no writes):
+#   cargo run -p potato-etl-cli --features postgres -- dry-run \
+#     --config examples/cli/postgres/05_aggregate.yaml --format table
+
+config:
+  batch_size: 1000
+  log_level: info
+
+connections:
+  pg:
+    driver: postgres
+    host: localhost
+    port: 5432
+    database: etl_demo
+    auth:
+      type: user_pass
+      username: etl_user
+      password: "etl_pass"
+
+steps:
+
+  - id: src
+    type: read_db
+    from:
+      connection: pg
+      table: employees
+      cursor: id
+    schema:
+      arrow:
+        columns:
+          salary:
+            type: float64
+
+  # Only active employees contribute to the payroll summary
+  - id: active
+    type: filter
+    input: src
+    condition: "status == \"active\""
+
+  - id: by_dept
+    type: aggregate
+    input: active
+    group_by: [department_id]
+    metrics:
+      headcount:    count()
+      avg_salary:   avg(salary)
+      min_salary:   min(salary)
+      max_salary:   max(salary)
+      total_payroll: sum(salary)
+
+  - id: out
+    type: write_db
+    input: by_dept
+    target:
+      connection: pg
+      table: dept_salary_summary
+    mode: truncate

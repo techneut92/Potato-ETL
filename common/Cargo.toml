@@ -1,0 +1,52 @@
+[package]
+name    = "potato-etl-common"
+version = "0.1.0"
+edition = "2024"
+
+# Foundation crate — shared types, schema, config, transforms, utilities.
+#
+# This crate provides:
+#   - config types (ReadOptions, WriteOptions, ETLConfig, ConnParams, …)
+#   - schema model (ColumnOption, TableSchema, DDL generation, …)
+#   - Arrow utilities
+#   - transform functions (filter, map, aggregate, flatten, …)
+#   - HTTP/REST API source/sink
+#   - file transport trait + local filesystem transport
+#   - Parquet file source/sink
+#   - database common layer (alignment, field_meta, type_coercion)
+#   - driver traits (SourceBuilder, SinkBuilder, Scd2Builder)
+#
+# Remote file transports (S3, SFTP, FTP, SharePoint, SMB) live in their
+# own crates under /transports/, following the same pattern as database
+# drivers under /drivers/.
+
+[features]
+default = ["parquet"]
+parquet = ["dep:parquet", "dep:bytes"]
+
+[dependencies]
+arrow            = { workspace = true }
+tokio            = { workspace = true }
+futures          = { workspace = true }
+async-stream     = { workspace = true }
+async-trait      = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+serde_yaml_ng    = { workspace = true }
+anyhow           = { workspace = true }
+chrono           = { workspace = true }
+tracing          = { workspace = true }
+tracing-subscriber = { workspace = true }
+indexmap          = { workspace = true }
+reqwest           = { workspace = true }
+base64            = { workspace = true }
+uuid              = { workspace = true }
+dashmap           = { workspace = true }
+jsonwebtoken      = { workspace = true }
+
+# Parquet support (optional, enabled by default)
+parquet           = { workspace = true, optional = true }
+bytes             = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }

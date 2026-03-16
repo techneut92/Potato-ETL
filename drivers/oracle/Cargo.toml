@@ -1,0 +1,20 @@
+[package]
+name    = "potato-etl-driver-oracle"
+version = "0.1.0"
+edition = "2024"
+
+# Oracle Database driver — requires Oracle Instant Client on the system.
+
+[dependencies]
+potato-etl-common = { workspace = true }
+arrow        = { workspace = true }
+tokio        = { workspace = true }
+futures      = { workspace = true }
+async-stream = { workspace = true }
+anyhow       = { workspace = true }
+chrono       = { workspace = true }
+tracing      = { workspace = true }
+serde        = { workspace = true }
+uuid         = { workspace = true }
+
+oracle = "0.6"

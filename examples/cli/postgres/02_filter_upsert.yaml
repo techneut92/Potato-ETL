@@ -1,0 +1,70 @@
+# examples/cli/postgres/02_filter_upsert.yaml
+#
+# Filter active employees, compute a bonus column, upsert into a target table.
+# Re-running this pipeline is safe — ON CONFLICT DO UPDATE keeps the target current.
+#
+# Run:
+#   cargo run -p potato-etl-cli --features postgres -- run \
+#     --config examples/cli/postgres/02_filter_upsert.yaml
+#
+# Inspect the Arrow schema of the `enriched` step (requires a live connection):
+#   cargo run -p potato-etl-cli --features postgres -- schema \
+#     --config examples/cli/postgres/02_filter_upsert.yaml --step enriched
+
+config:
+  batch_size: 500
+  log_level: info
+
+connections:
+  pg:
+    driver: postgres
+    host: localhost
+    port: 5432
+    database: etl_demo
+    auth:
+      type: user_pass
+      username: etl_user
+      password: "etl_pass"
+
+steps:
+
+  - id: src
+    type: read_db
+    from:
+      connection: pg
+      table: employees
+      cursor: id
+    schema:
+      arrow:
+        columns:
+          salary:
+            type: float64           # ensure Arrow Float64, not Decimal128
+
+  # Keep only current employees
+  - id: active
+    type: filter
+    input: src
+    condition: "status == \"active\""
+
+  # Compute a 10 % performance bonus
+  - id: enriched
+    type: map
+    input: active
+    columns:
+      bonus: "salary * 0.10"
+      load_ts: "now()"
+
+  # Upsert by primary key — safe to re-run
+  - id: out
+    type: write_db
+    input: enriched
+    target:
+      connection: pg
+      table: employees_active
+    mode: upsert
+    create_table: if_not_exists
+    schema:
+      database:
+        columns:
+          id:
+            primary_key: true

@@ -1,0 +1,54 @@
+[package]
+name    = "potato-etl-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "potato_etl"
+path = "src/main.rs"
+
+[dependencies]
+tokio    = { version = "1",    features = ["full"] }
+anyhow   = "1"
+clap     = { version = "4",    features = ["derive"] }
+arrow    = { version = "58" }
+serde_json = "1"
+
+[dependencies.potato-etl-runtime]
+path     = "../runtime"
+features = []
+
+# ── Feature pass-through ───────────────────────────────────────────────────────
+# Enable the DB + transport features you need for your target platform.
+# e.g.: cargo build -p potato-etl-cli --features postgres,mssql,transport-cloud
+[features]
+default = []
+
+# Everything: all database drivers + all file transports.
+all = [
+    "postgres", "mssql", "mssql-bcp", "mssql-odbc", "oracle", "mysql",
+    "databricks", "databricks-odbc", "databricks-thrift",
+    "transport-cloud", "transport-sftp", "transport-ftp",
+    "transport-sharepoint", "transport-smb",
+]
+
+# ── Database drivers ─────────────────────────────────────────────────────────
+
+postgres          = ["potato-etl-runtime/postgres"]
+mssql             = ["potato-etl-runtime/mssql"]
+mssql-bcp         = ["potato-etl-runtime/mssql-bcp"]
+mssql-odbc        = ["potato-etl-runtime/mssql-odbc"]
+oracle            = ["potato-etl-runtime/oracle"]
+mysql             = ["potato-etl-runtime/mysql"]
+databricks        = ["potato-etl-runtime/databricks"]
+databricks-odbc   = ["potato-etl-runtime/databricks-odbc"]
+databricks-thrift = ["potato-etl-runtime/databricks-thrift"]
+
+# ── File transports ──────────────────────────────────────────────────────────
+
+transport-cloud      = ["potato-etl-runtime/transport-cloud"]
+transport-sftp       = ["potato-etl-runtime/transport-sftp"]
+transport-ftp        = ["potato-etl-runtime/transport-ftp"]
+transport-sharepoint = ["potato-etl-runtime/transport-sharepoint"]
+transport-smb        = ["potato-etl-runtime/transport-smb"]
+transport-all        = ["potato-etl-runtime/transport-all"]
