@@ -1,7 +1,7 @@
 //! DDL generation and SQL dialect mapping.
 //!
 //! [`generate_ddl`] converts an Arrow schema (enriched with `etl.*` metadata
-//! by [`apply_column_options`][super::apply_column_options]) into `CREATE TABLE`
+//! by [`apply_database_columns`][super::apply_database_columns]) into `CREATE TABLE`
 //! and post-create statements for the five supported SQL dialects.
 //!
 //! [`SqlDialect`] is auto-detected from connection URL prefixes via

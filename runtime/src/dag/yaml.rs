@@ -288,7 +288,10 @@ impl Dag {
                  to enable secret resolution."
             );
         }
-        let doc: PipelineDoc = serde_yaml_ng::from_str(yaml)
+        let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)
+            .map_err(|e| anyhow::anyhow!("YAML parse error: {e}"))?;
+        reject_legacy_step_fields_yaml(&value)?;
+        let doc: PipelineDoc = serde_yaml_ng::from_value(value)
             .map_err(|e| anyhow::anyhow!("YAML parse error: {e}"))?;
         build_dag_from_doc(doc)
     }
@@ -334,7 +337,10 @@ impl Dag {
             map.remove(&serde_yaml_ng::Value::String("secrets".into()));
         }
 
-        // 4. Deserialize resolved value into PipelineDoc.
+        // 4. Reject legacy step-level fields before deserialization.
+        reject_legacy_step_fields_yaml(&value)?;
+
+        // 5. Deserialize resolved value into PipelineDoc.
         let doc: PipelineDoc = serde_yaml_ng::from_value(value)
             .map_err(|e| anyhow::anyhow!("YAML parse error (after secret resolution): {e}"))?;
 
@@ -376,4 +382,46 @@ impl Dag {
         serde_json::to_string(&doc)
             .map_err(|e| anyhow::anyhow!("JSON serialization error: {e}"))
     }
+}
+
+/// Hard-error if a step uses removed legacy fields (`values:`, plus any future
+/// removed-but-silently-ignored YAML keys). Without this guard serde drops the
+/// unknown key and the pipeline runs with the silently-broken intent.
+pub(crate) fn reject_legacy_step_fields_yaml(value: &serde_yaml_ng::Value) -> anyhow::Result<()> {
+    let steps = value.get("steps").and_then(|v| v.as_sequence());
+    let Some(steps) = steps else { return Ok(()) };
+    for step in steps {
+        let Some(map) = step.as_mapping() else { continue };
+        if map.contains_key(&serde_yaml_ng::Value::String("values".into())) {
+            let id = map
+                .get(&serde_yaml_ng::Value::String("id".into()))
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>");
+            anyhow::bail!("{}", legacy_values_error_message(id));
+        }
+    }
+    Ok(())
+}
+
+/// JSON-side equivalent of [`reject_legacy_step_fields_yaml`].
+pub(crate) fn reject_legacy_step_fields_json(value: &serde_json::Value) -> anyhow::Result<()> {
+    let steps = value.get("steps").and_then(|v| v.as_array());
+    let Some(steps) = steps else { return Ok(()) };
+    for step in steps {
+        let Some(obj) = step.as_object() else { continue };
+        if obj.contains_key("values") {
+            let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+            anyhow::bail!("{}", legacy_values_error_message(id));
+        }
+    }
+    Ok(())
+}
+
+fn legacy_values_error_message(step_id: &str) -> String {
+    format!(
+        "step '{step_id}' uses the removed top-level `values:` field. Migrate to:\n  \
+         - schema.arrow.columns.<col>.value: <expr>  (env-var / column-ref / literal injection)\n  \
+         - schema.database.columns.<src>.rename_to: <target>  (column renames)\n  \
+         - schema.database.columns.<src>.drop: true  (column drops)"
+    )
 }

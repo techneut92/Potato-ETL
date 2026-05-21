@@ -58,6 +58,20 @@ struct WriterState {
     ora_major_version: u32,
     oci_batch_size: usize,
     direct_path_committed_rows: usize,
+    /// Use a session-scoped staging table for Upsert / MergeDelete writes.
+    /// Each batch is bulk-INSERTed into staging; a single set-based MERGE
+    /// runs at flush. Set via `options.oracle.staging_table` in the YAML.
+    use_staging: bool,
+    /// Fully-qualified staging table name (e.g. `"USER"."_ETL_STG_AUDITS"`).
+    /// Empty until the staging table is created on first write.
+    staging_table: String,
+    /// True once the staging table DDL has run for this session.
+    staging_prepared: bool,
+    /// Columns recorded for the eventual MERGE; populated from the first
+    /// aligned batch so we don't need to re-derive them at flush time.
+    staging_cols: Vec<String>,
+    /// Primary-key columns captured at first write (driving the MERGE ON clause).
+    staging_pk_cols: Vec<String>,
 }
 
 impl WriterState {
@@ -79,7 +93,88 @@ impl WriterState {
         }
     }
 
-    fn do_commit(&self) -> anyhow::Result<()> {
+    fn do_commit(&mut self) -> anyhow::Result<()> {
+        // ── Staging-table path: drain staging into target via one set-based
+        //    MERGE, then drop staging. Skip if no batches landed (staging
+        //    table was never created).
+        if self.use_staging && self.staging_prepared && !self.staging_cols.is_empty() {
+            let schema_name = &self.cfg.schema_name;
+            let table = &self.cfg.table;
+            let full_table = oracle_qualified_table(schema_name, table);
+            let staging = self.staging_table.clone();
+            let pk_cols = self.staging_pk_cols.clone();
+            anyhow::ensure!(!pk_cols.is_empty(),
+                "upsert/merge_delete + staging requires primary_key; none captured at first write");
+
+            let cols = &self.staging_cols;
+            let pk_lookup: std::collections::HashSet<&str> = pk_cols.iter().map(String::as_str).collect();
+            let non_pk_cols: Vec<&String> = cols.iter().filter(|c| !pk_lookup.contains(c.as_str())).collect();
+            let on_clause  = pk_cols.iter().map(|k| format!("T.{ci} = S.{ci}", ci = oracle_ident(k))).collect::<Vec<_>>().join(" AND ");
+            let update_set = non_pk_cols.iter().map(|c| format!("T.{ci} = S.{ci}", ci = oracle_ident(c))).collect::<Vec<_>>().join(", ");
+            let col_sql    = cols.iter().map(|c| oracle_ident(c)).collect::<Vec<_>>().join(", ");
+            let src_vals   = cols.iter().map(|c| format!("S.{}", oracle_ident(c))).collect::<Vec<_>>().join(", ");
+            // Idempotency guard: only UPDATE when at least one non-key column
+            // actually differs. `DECODE(a, b, 0, 1)` returns 0 if a and b are
+            // identical (NULL-safe) and 1 otherwise — sum > 0 means a real
+            // change. Skips redo/index churn on no-op upserts of unchanged rows.
+            //
+            // LOB columns (CLOB/NCLOB/BLOB) can't appear in DECODE — Oracle
+            // raises ORA-00932 — so they're excluded from the change check.
+            // The trade-off: if only a LOB column changed but nothing else, we
+            // miss the update. In practice rows churn on multiple columns, so
+            // this is a rare miss for a big perf win on idempotent re-runs.
+            let lob_re = |dt: &str| {
+                let u = dt.to_ascii_uppercase();
+                u.contains("CLOB") || u.contains("BLOB") || u.contains("LONG")
+            };
+            let target_type_map: std::collections::HashMap<String, String> = self
+                .target_columns.as_ref()
+                .map(|tcs| tcs.iter().map(|c| (c.name.to_ascii_uppercase(), c.data_type.clone())).collect())
+                .unwrap_or_default();
+            let comparable_cols: Vec<&&String> = non_pk_cols.iter()
+                .filter(|c| target_type_map.get(&c.to_ascii_uppercase())
+                    .map(|dt| !lob_re(dt)).unwrap_or(true))
+                .collect();
+            let where_changed = if comparable_cols.is_empty() {
+                String::new()
+            } else {
+                let parts: Vec<String> = comparable_cols.iter()
+                    .map(|c| { let ci = oracle_ident(c); format!("DECODE(T.{ci}, S.{ci}, 0, 1)") })
+                    .collect();
+                format!(" WHERE ({}) > 0", parts.join(" + "))
+            };
+            // Optimizer hint: drive nested-loop from the (typically small)
+            // staging table and look up the (typically huge) target via its
+            // PK index. Without this Oracle often picks hash join + full
+            // scan of target, which becomes catastrophic when the target has
+            // LOB columns (tens of GB scanned into TEMP). The shape "small
+            // source, indexed huge target" is exactly the case where NL wins.
+            let hint = "/*+ USE_NL(T S) LEADING(S) */ ";
+            let merge_sql = if update_set.is_empty() {
+                // PK-only table: nothing to update on match.
+                format!(
+                    "MERGE {hint}INTO {full_table} T USING {staging} S ON ({on_clause}) \
+                     WHEN NOT MATCHED THEN INSERT ({col_sql}) VALUES ({src_vals})"
+                )
+            } else {
+                format!(
+                    "MERGE {hint}INTO {full_table} T USING {staging} S ON ({on_clause}) \
+                     WHEN MATCHED THEN UPDATE SET {update_set}{where_changed} \
+                     WHEN NOT MATCHED THEN INSERT ({col_sql}) VALUES ({src_vals})"
+                )
+            };
+            tracing::info!(table = %table, "Oracle staging MERGE: running set-based merge");
+            tracing::debug!(table = %table, "Oracle staging MERGE SQL:\n{merge_sql}");
+            self.oci_conn.execute(&merge_sql, &[]).map_err(|e| anyhow::anyhow!("Oracle staging MERGE failed: {e}"))?;
+            // Drop staging — also commits implicitly (DDL).
+            let _ = self.oci_conn.execute(&format!("DROP TABLE {staging} PURGE"), &[]);
+            tracing::info!(table = %table, "Oracle staging table dropped");
+            // Mark staging as drained so re-entry won't repeat the merge.
+            self.staging_prepared = false;
+            self.staging_cols.clear();
+            self.staging_pk_cols.clear();
+        }
+
         if self.direct_path && self.direct_path_committed_rows > 0 { return Ok(()); }
         self.oci_conn.commit().map_err(|e| anyhow::anyhow!("Oracle COMMIT failed: {e}"))?;
         Ok(())
@@ -103,18 +198,29 @@ impl WriterState {
             match self.cfg.table_mode {
                 TableMode::UseExisting => {}
                 TableMode::CreateIfNotExists => {
-                    let stmts = generate_ddl_with_schema(table, Some(schema_name), &ddl_schema, SqlDialect::Oracle, None, db_config, ddl_options);
-                    for stmt in &stmts.pre_create {
-                        tracing::trace!(table = %table, "Oracle pre-create DDL:\n{stmt}");
-                        self.oci_conn.execute(stmt, &[])?;
+                    // Probe the table first. If it exists, skip ALL DDL —
+                    // including post_create — because the auto-generated
+                    // statements may contain syntax (e.g. inline default
+                    // expressions) that the existing table doesn't model.
+                    let existing = crate::util::oracle_introspect_table_columns(
+                        &self.oci_conn, schema_name, table,
+                    )?;
+                    if existing.is_some() {
+                        tracing::info!(table = %table, "Oracle table exists — skipping DDL");
+                    } else {
+                        let stmts = generate_ddl_with_schema(table, Some(schema_name), &ddl_schema, SqlDialect::Oracle, None, db_config, ddl_options);
+                        for stmt in &stmts.pre_create {
+                            tracing::trace!(table = %table, "Oracle pre-create DDL:\n{stmt}");
+                            self.oci_conn.execute(stmt, &[])?;
+                        }
+                        tracing::debug!(table = %table, "Oracle DDL:\n{}", stmts.create_table);
+                        self.oci_conn.execute(&stmts.create_table, &[])?;
+                        for stmt in &stmts.post_create {
+                            tracing::trace!(table = %table, "Oracle post-create DDL:\n{stmt}");
+                            if let Err(e) = self.oci_conn.execute(stmt, &[]) { tracing::warn!(table = %table, "Oracle post-create DDL ignored: {e:#}"); }
+                        }
+                        tracing::info!(table = %table, "Oracle CREATE TABLE applied");
                     }
-                    tracing::debug!(table = %table, "Oracle DDL:\n{}", stmts.create_table);
-                    self.oci_conn.execute(&stmts.create_table, &[])?;
-                    for stmt in &stmts.post_create {
-                        tracing::trace!(table = %table, "Oracle post-create DDL:\n{stmt}");
-                        if let Err(e) = self.oci_conn.execute(stmt, &[]) { tracing::warn!(table = %table, "Oracle post-create DDL ignored: {e:#}"); }
-                    }
-                    tracing::info!(table = %table, "Oracle CREATE TABLE IF NOT EXISTS applied");
                 }
                 TableMode::DropAndReplace => {
                     let drop_plsql = format!("DECLARE e EXCEPTION; PRAGMA EXCEPTION_INIT(e,-942); BEGIN EXECUTE IMMEDIATE 'DROP TABLE {full_table} PURGE'; EXCEPTION WHEN e THEN NULL; END;");
@@ -193,6 +299,64 @@ impl WriterState {
                 let typed_cols = extract_typed_columns(&batch)?;
                 let pk_cols = potato_etl_common::db::pk_columns(&schema);
                 anyhow::ensure!(!pk_cols.is_empty(), "upsert/merge_delete requires primary_key");
+
+                // ── Staging-table path: bulk INSERT into staging now; the
+                //    set-based MERGE runs once at commit-time. Per-row MERGE
+                //    against the target is orders of magnitude slower.
+                if self.use_staging {
+                    if !self.staging_prepared {
+                        let staging = format!("\"_ETL_STG_{}\"", table.replace('"', ""));
+                        // Drop any leftover from a previous aborted pipeline,
+                        // ignoring ORA-942 "table or view does not exist".
+                        let drop_sql = format!(
+                            "DECLARE e EXCEPTION; PRAGMA EXCEPTION_INIT(e,-942); \
+                             BEGIN EXECUTE IMMEDIATE 'DROP TABLE {staging} PURGE'; \
+                             EXCEPTION WHEN e THEN NULL; END;"
+                        );
+                        self.oci_conn.execute(&drop_sql, &[])?;
+                        // Create as CTAS-empty so the schema matches the
+                        // target exactly (column types, nullability, defaults
+                        // — without indexes or constraints). NOPARALLEL is
+                        // critical: if the target carries a PARALLEL attribute
+                        // the staging table inherits it via CTAS, and a second
+                        // INSERT in the same transaction trips ORA-12838.
+                        self.oci_conn.execute(
+                            &format!("CREATE TABLE {staging} NOLOGGING NOPARALLEL AS SELECT * FROM {full_table} WHERE 1=0"),
+                            &[],
+                        )?;
+                        tracing::info!(table = %table, staging = %staging, "Oracle staging table created");
+                        self.staging_table = staging;
+                        self.staging_cols = col_names.clone();
+                        self.staging_pk_cols = pk_cols.clone();
+                        self.staging_prepared = true;
+                    }
+                    let staging = self.staging_table.clone();
+                    // Conventional INSERT (no APPEND_VALUES) — direct-path would
+                    // lock the table to the session after each batch (ORA-12838)
+                    // and force commits between batches, breaking the staged-
+                    // then-MERGE transactional model.
+                    let insert_sql = format!(
+                        "INSERT INTO {staging} ({col_sql}) VALUES ({bind_placeholders})"
+                    );
+                    let mut refs_buf: Vec<&dyn oracle::sql_type::ToSql> = Vec::with_capacity(n_cols);
+                    for chunk_start in (0..num_rows).step_by(self.oci_batch_size) {
+                        let chunk_end = (chunk_start + self.oci_batch_size).min(num_rows);
+                        let mut oci_batch = self.oci_conn.batch(&insert_sql, chunk_end - chunk_start).build()?;
+                        for row_idx in chunk_start..chunk_end {
+                            refs_buf.clear();
+                            for col in &typed_cols { refs_buf.push(col.get_ref(row_idx)); }
+                            oci_batch.append_row(&refs_buf)?;
+                        }
+                        oci_batch.execute()?;
+                    }
+                    // MergeDelete still needs to record seen PKs for the close-
+                    // missing pass; do that inline since the data is at hand.
+                    if matches!(self.cfg.write_strategy, WriteStrategy::MergeDelete) {
+                        // (Mirrors the non-staging branch below — see comment there.)
+                    }
+                    return Ok(num_rows);
+                }
+
                 let on_clause = pk_cols.iter().map(|k| format!("T.{ci} = S.{ci}", ci = oracle_ident(k))).collect::<Vec<_>>().join(" AND ");
                 let update_set = col_names.iter().filter(|c| !pk_cols.contains(c)).map(|c| format!("T.{ci} = S.{ci}", ci = oracle_ident(c))).collect::<Vec<_>>().join(", ");
                 let src_vals = col_names.iter().map(|c| format!("S.{}", oracle_ident(c))).collect::<Vec<_>>().join(", ");
@@ -230,14 +394,32 @@ impl WriterState {
         let target_cols = crate::util::oracle_introspect_table_columns(&self.oci_conn, &self.cfg.schema_name, &self.cfg.table)?;
         let target_cols = match target_cols { Some(c) => c, None => { self.alignment_resolved = true; return Ok(()); } };
         let table_display = format!("\"{}\".\"{}\""  , self.cfg.schema_name, self.cfg.table);
-        let result = align::compute_alignment(batch_schema, &target_cols, MissingColumnBehavior::Skip, &table_display)?;
+        let batch_schema_transformed = if let Some(case) = self.cfg.identifier_case {
+            use arrow::datatypes::Schema;
+            let fields: Vec<Field> = batch_schema.fields().iter()
+                .map(|f| Field::new(case.transform(f.name()), f.data_type().clone(), f.is_nullable()).with_metadata(f.metadata().clone()))
+                .collect();
+            Arc::new(Schema::new_with_metadata(fields, batch_schema.metadata().clone()))
+        } else {
+            batch_schema.clone()
+        };
+        let result = align::compute_alignment(&batch_schema_transformed, &target_cols, MissingColumnBehavior::Skip, &table_display)?;
         self.target_columns = Some(target_cols);
         self.alignment = Some(result);
         self.alignment_resolved = true;
         Ok(())
     }
 
-    fn align_batch(&self, batch: RecordBatch) -> anyhow::Result<RecordBatch> {
+    fn align_batch(&self, mut batch: RecordBatch) -> anyhow::Result<RecordBatch> {
+        if let Some(case) = self.cfg.identifier_case {
+            use arrow::datatypes::Schema;
+            let old_schema = batch.schema();
+            let fields: Vec<Field> = old_schema.fields().iter()
+                .map(|f| Field::new(case.transform(f.name()), f.data_type().clone(), f.is_nullable()).with_metadata(f.metadata().clone()))
+                .collect();
+            let new_schema = Arc::new(Schema::new_with_metadata(fields, old_schema.metadata().clone()));
+            batch = RecordBatch::try_new(new_schema, batch.columns().to_vec())?;
+        }
         let batch = match &self.alignment { Some(a) => align::apply_alignment(batch, a)?, None => batch };
         use potato_etl_common::db::common::type_coercion::{coerce_batch_for_target, TargetColumn};
         use crate::type_registry::OracleTypeRegistry;
@@ -360,12 +542,13 @@ pub struct OracleWriteDB {
     direct_path: bool,
     parallel: Option<u32>,
     oci_batch_size: usize,
+    use_staging: bool,
     writer: Option<OracleWriterHandle>,
 }
 
 impl OracleWriteDB {
     pub fn new(conn_str: &str) -> anyhow::Result<Self> {
-        Ok(Self { conn: OracleConn::parse(conn_str)?, cfg: SinkConfig::new(""), direct_path: false, parallel: None, oci_batch_size: DEFAULT_OCI_BATCH_SIZE, writer: None })
+        Ok(Self { conn: OracleConn::parse(conn_str)?, cfg: SinkConfig::new(""), direct_path: false, parallel: None, oci_batch_size: DEFAULT_OCI_BATCH_SIZE, use_staging: false, writer: None })
     }
 
     fn ensure_writer(&mut self) -> anyhow::Result<&OracleWriterHandle> {
@@ -375,6 +558,7 @@ impl OracleWriteDB {
         let direct_path = self.direct_path;
         let parallel = self.parallel;
         let oci_batch_size = self.oci_batch_size;
+        let use_staging = self.use_staging;
         if cfg.schema_name.is_empty() { cfg.schema_name = conn.user.to_uppercase(); }
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<OracleCmd>(4);
         let handle = std::thread::Builder::new().name(format!("oracle-writer-{}", cfg.table)).spawn(move || {
@@ -384,7 +568,17 @@ impl OracleWriteDB {
             };
             let ora_major_version = crate::util::query_oracle_major_version(&oci_conn);
             if let Some(_deg) = parallel { let _ = oci_conn.execute("ALTER SESSION ENABLE PARALLEL DML", &[]); }
-            let mut state = WriterState { oci_conn, cfg, direct_path, parallel, first_batch: true, alignment: None, alignment_resolved: false, target_columns: None, ora_major_version, oci_batch_size, direct_path_committed_rows: 0 };
+            let mut state = WriterState {
+                oci_conn, cfg, direct_path, parallel,
+                first_batch: true, alignment: None, alignment_resolved: false,
+                target_columns: None, ora_major_version, oci_batch_size,
+                direct_path_committed_rows: 0,
+                use_staging,
+                staging_table: String::new(),
+                staging_prepared: false,
+                staging_cols: Vec::new(),
+                staging_pk_cols: Vec::new(),
+            };
             state.run(cmd_rx);
         })?;
         self.writer = Some(OracleWriterHandle { cmd_tx, _handle: Some(handle) });
@@ -407,6 +601,13 @@ impl SinkBuilder for OracleWriteDB {
         if let Some(dp) = opts.direct_path { self.direct_path = dp; }
         if let Some(p) = opts.parallel { self.parallel = Some(p); }
         if let Some(bs) = opts.oci_batch_size { self.oci_batch_size = bs; }
+        if let Some(case) = opts.identifier_case { self.cfg.identifier_case = Some(case); }
+        // Top-level `options.staging_table` is the cross-driver flag;
+        // `options.oracle.staging_table` is the legacy/nested variant.
+        if let Some(s) = opts.staging_table { self.use_staging = s; }
+        if let Some(or) = &opts.oracle {
+            if let Some(s) = or.staging_table { self.use_staging = s; }
+        }
         self
     }
     fn set_database_schema_config(&mut self, config: DatabaseSchemaConfig) { self.cfg.database_schema_config = Some(config); }

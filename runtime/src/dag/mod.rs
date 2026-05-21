@@ -62,11 +62,11 @@ use crate::config::ConnParams;
 use crate::db::{ReadDB, Scd2ColumnNames, WriteDB};
 use crate::http::{fetch_rest_api, send_to_rest_api, RestApiOptions, RestApiSinkOptions};
 use crate::schema::{
-    apply_rename, apply_value_injections, apply_exclude_columns,
-    ArrowOverridesPlan, compile_arrow_overrides, apply_arrow_overrides_plan,
+    apply_rename, apply_value_injections, apply_exclude_columns, apply_database_structural,
+    ArrowTypeOverridesPlan, compile_arrow_type_overrides, apply_arrow_type_overrides_plan,
     MetadataStampPlan, compile_metadata_stamps, apply_metadata_stamp_plan,
 };
-use crate::schema::field::ColumnOptionsMap;
+use crate::schema::field::DatabaseColumnsMap;
 use crate::transform::expr::{EvalContext, set_eval_context, set_env_vars, eval, parse};
 use crate::transform::flatten::apply_flatten;
 use crate::transform::unnest::{apply_unnest, UnnestConfig};
@@ -978,16 +978,16 @@ impl Dag {
 
     // ── Post-construction patching ────────────────────────────────────────────
 
-    /// Attach (or replace) `column_options` for an already-registered sink step.
+    /// Attach (or replace) `database_columns` for an already-registered sink step.
     /// Only `Sink` and `Scd2Sink` accept column options; other step types
     /// are silently ignored.
     ///
-    /// A no-op when `column_options` is empty or `id` is not found.
-    pub fn patch_column_options(&mut self, id: &str, column_options: ColumnOptionsMap) {
-        if column_options.is_empty() { return; }
+    /// A no-op when `database_columns` is empty or `id` is not found.
+    pub fn patch_database_columns(&mut self, id: &str, database_columns: DatabaseColumnsMap) {
+        if database_columns.is_empty() { return; }
         let Some(spec) = self.specs.get_mut(id) else { return };
-        // Convert ColumnOptionsMap → DatabaseSchemaConfig.columns
-        let db_columns: indexmap::IndexMap<String, crate::config::DatabaseColumnDef> = column_options.into_iter()
+        // Convert DatabaseColumnsMap → DatabaseSchemaConfig.columns
+        let db_columns: indexmap::IndexMap<String, crate::config::DatabaseColumnDef> = database_columns.into_iter()
             .map(|(name, co)| (name, crate::config::DatabaseColumnDef {
                 db_type:        co.db_type,
                 primary_key:    co.primary_key,
@@ -1000,6 +1000,8 @@ impl Dag {
                 foreign_key:    co.foreign_key,
                 description:    co.description,
                 enum_values:    None,
+                rename_to:      co.rename_to,
+                drop:           co.drop,
             }))
             .collect();
         let db_config = crate::config::DatabaseSchemaConfig {
@@ -1013,7 +1015,7 @@ impl Dag {
         match spec {
             ComponentSpec::Sink { opts, .. } => patch_schema(&mut opts.sink_schema),
             ComponentSpec::Scd2Sink { sink_schema, .. } => patch_schema(sink_schema),
-            _ => {} // silently ignore — column_options only applies to sinks
+            _ => {} // silently ignore — database_columns only applies to sinks
         }
     }
 
@@ -1220,8 +1222,14 @@ impl Dag {
                  h2=warn,\
                  tower=warn"
             )));
+        // Honor NO_COLOR (https://no-color.org/) and RUST_LOG_STYLE=never so
+        // terminals that don't render ANSI escapes (CI logs, some k8s/podman
+        // consoles, JetBrains run windows) stay readable.
+        let ansi_enabled = std::env::var("NO_COLOR").map(|v| v.is_empty()).unwrap_or(true)
+            && std::env::var("RUST_LOG_STYLE").map(|v| v != "never").unwrap_or(true);
         let _ = tracing_subscriber::fmt()
             .with_env_filter(filter)
+            .with_ansi(ansi_enabled)
             .try_init();
 
         // Note: validate() was already called at the top of run_inner().
@@ -1722,21 +1730,21 @@ async fn write_scd2_batch_chunked(
 
 /// Stateful helper for applying source-side schema settings to each batch.
 ///
-/// Handles `exclude`, `arrow_overrides`, value injections (from
+/// Handles `exclude`, `arrow_type_overrides`, value injections (from
 /// `schema.arrow.columns` entries with `value:`), `database.columns` metadata
 /// stamps (primary_key, db_type, etc.), and `normalize_columns`
 /// from [`SourceSchemaConfig`] with a compile-once / apply-many pattern.
 struct SourceSchemaApplicator {
     source_schema: SourceSchemaConfig,
-    arrow_overrides_cache: HashMap<String, String>,
+    arrow_type_overrides_cache: HashMap<String, String>,
     /// Cached value injection columns (extracted once from `schema.arrow`).
     value_injections_cache: HashMap<String, crate::config::ArrowColumnDef>,
     /// Cached database column options (extracted once from `schema.database`).
     /// Stamped as `etl.*` Arrow field metadata so downstream sinks can use
     /// them for DDL generation (e.g. primary keys on Databricks sources).
-    column_options_cache: ColumnOptionsMap,
+    database_columns_cache: DatabaseColumnsMap,
     normalize: bool,
-    override_plan: Option<ArrowOverridesPlan>,
+    override_plan: Option<ArrowTypeOverridesPlan>,
     plan_compiled: bool,
     stamp_plan: Option<MetadataStampPlan>,
     stamp_compiled: bool,
@@ -1744,19 +1752,19 @@ struct SourceSchemaApplicator {
 
 impl SourceSchemaApplicator {
     fn new(source_schema: SourceSchemaConfig, normalize: bool) -> Self {
-        let arrow_overrides_cache = source_schema.arrow_overrides();
+        let arrow_type_overrides_cache = source_schema.arrow_type_overrides();
         let value_injections_cache: HashMap<String, crate::config::ArrowColumnDef> =
             source_schema.schema.value_injection_columns()
                 .into_iter()
                 .map(|(k, v)| (k, v.clone()))
                 .collect();
-        let column_options_cache = source_schema.schema.column_options_map();
-        Self { source_schema, arrow_overrides_cache, value_injections_cache,
-               column_options_cache, normalize, override_plan: None, plan_compiled: false,
+        let database_columns_cache = source_schema.schema.database_columns_map();
+        Self { source_schema, arrow_type_overrides_cache, value_injections_cache,
+               database_columns_cache, normalize, override_plan: None, plan_compiled: false,
                stamp_plan: None, stamp_compiled: false }
     }
 
-    /// Apply exclude → arrow_overrides → value_injections → metadata_stamps → normalize_columns to a batch.
+    /// Apply exclude → arrow_type_overrides → value_injections → metadata_stamps → normalize_columns to a batch.
     fn apply(&mut self, batch: RecordBatch) -> anyhow::Result<RecordBatch> {
         // 1. Exclude columns
         let batch = if !self.source_schema.exclude.is_empty() {
@@ -1768,16 +1776,16 @@ impl SourceSchemaApplicator {
         // 2. Arrow overrides (compile-once)
         let batch = if !self.plan_compiled {
             self.plan_compiled = true;
-            self.override_plan = compile_arrow_overrides(
-                &batch.schema(), &self.arrow_overrides_cache,
+            self.override_plan = compile_arrow_type_overrides(
+                &batch.schema(), &self.arrow_type_overrides_cache,
             )?;
             match &self.override_plan {
-                Some(plan) => apply_arrow_overrides_plan(batch, plan)?,
+                Some(plan) => apply_arrow_type_overrides_plan(batch, plan)?,
                 None       => batch,
             }
         } else {
             match &self.override_plan {
-                Some(plan) => apply_arrow_overrides_plan(batch, plan)?,
+                Some(plan) => apply_arrow_type_overrides_plan(batch, plan)?,
                 None       => batch,
             }
         };
@@ -1797,7 +1805,7 @@ impl SourceSchemaApplicator {
             self.stamp_compiled = true;
             self.stamp_plan = compile_metadata_stamps(
                 &batch.schema(),
-                &self.column_options_cache,
+                &self.database_columns_cache,
             )?;
             match &self.stamp_plan {
                 Some(plan) => apply_metadata_stamp_plan(batch, plan)?,
@@ -1810,7 +1818,16 @@ impl SourceSchemaApplicator {
             }
         };
 
-        // 5. Normalize column names
+        // 5. Structural changes from schema.database.columns — rename_to and drop.
+        //    Runs AFTER metadata stamping so PK/type/etc. follow the column
+        //    through the rename. drop removes the column entirely.
+        let batch = if !self.database_columns_cache.is_empty() {
+            apply_database_structural(batch, &self.database_columns_cache)?
+        } else {
+            batch
+        };
+
+        // 6. Normalize column names
         let batch = if self.normalize { apply_normalize_columns(batch)? } else { batch };
         Ok(batch)
     }
@@ -1820,63 +1837,63 @@ impl SourceSchemaApplicator {
 
 /// Stateful helper for applying sink-side schema settings to each batch.
 ///
-/// Handles `arrow_overrides` (Arrow casts), value injections (from
-/// `schema.arrow.columns` entries with `value:`), and `column_options`
+/// Handles `arrow_type_overrides` (Arrow casts), value injections (from
+/// `schema.arrow.columns` entries with `value:`), and `database_columns`
 /// (DDL hints incl. `db_type`) from [`SinkSchemaConfig`]
 /// with a compile-once / apply-many pattern.
 struct SinkSchemaApplicator {
     sink_schema: SinkSchemaConfig,
     /// Cached arrow overrides map (extracted once from `schema.arrow`).
-    arrow_overrides_cache: HashMap<String, String>,
+    arrow_type_overrides_cache: HashMap<String, String>,
     /// Cached value injection columns (extracted once from `schema.arrow`).
     value_injections_cache: HashMap<String, crate::config::ArrowColumnDef>,
     /// Cached column options map (extracted once from `schema.database`).
-    column_options_cache: HashMap<String, crate::schema::field::ColumnOption>,
+    database_columns_cache: HashMap<String, crate::schema::field::ColumnOption>,
     /// Column names in YAML-defined order (from `schema.database.columns`
     /// IndexMap).  Used by `compute_ddl_schema` to preserve user-specified
     /// column order when appending DDL-only columns.
     ordered_column_names: Vec<String>,
     stamp_plan: Option<MetadataStampPlan>,
     stamp_compiled: bool,
-    override_plan: Option<ArrowOverridesPlan>,
+    override_plan: Option<ArrowTypeOverridesPlan>,
     override_compiled: bool,
 }
 
 impl SinkSchemaApplicator {
     fn new(sink_schema: SinkSchemaConfig) -> Self {
-        let arrow_overrides_cache = sink_schema.arrow_overrides();
+        let arrow_type_overrides_cache = sink_schema.arrow_type_overrides();
         let value_injections_cache: HashMap<String, crate::config::ArrowColumnDef> =
             sink_schema.schema.value_injection_columns()
                 .into_iter()
                 .map(|(k, v)| (k, v.clone()))
                 .collect();
-        let column_options_cache = sink_schema.column_options();
+        let database_columns_cache = sink_schema.database_columns();
         let ordered_column_names: Vec<String> = sink_schema.schema.database
             .as_ref()
             .map(|db| db.columns.keys().cloned().collect())
             .unwrap_or_default();
-        Self { sink_schema, arrow_overrides_cache, value_injections_cache,
-               column_options_cache, ordered_column_names,
+        Self { sink_schema, arrow_type_overrides_cache, value_injections_cache,
+               database_columns_cache, ordered_column_names,
                stamp_plan: None, stamp_compiled: false,
                override_plan: None, override_compiled: false }
     }
 
-    /// Apply arrow_overrides → value_injections → column_options to a batch.
+    /// Apply arrow_type_overrides → value_injections → database_columns to a batch.
     fn apply(&mut self, batch: RecordBatch) -> anyhow::Result<RecordBatch> {
         // 1. Arrow overrides (Arrow type casts) — compile once
         let batch = if !self.override_compiled {
             self.override_compiled = true;
-            self.override_plan = compile_arrow_overrides(
+            self.override_plan = compile_arrow_type_overrides(
                 &batch.schema(),
-                &self.arrow_overrides_cache,
+                &self.arrow_type_overrides_cache,
             )?;
             match &self.override_plan {
-                Some(plan) => apply_arrow_overrides_plan(batch, plan)?,
+                Some(plan) => apply_arrow_type_overrides_plan(batch, plan)?,
                 None       => batch,
             }
         } else {
             match &self.override_plan {
-                Some(plan) => apply_arrow_overrides_plan(batch, plan)?,
+                Some(plan) => apply_arrow_type_overrides_plan(batch, plan)?,
                 None       => batch,
             }
         };
@@ -1888,12 +1905,12 @@ impl SinkSchemaApplicator {
             batch
         };
 
-        // 3. Metadata stamps (column_options incl. db_type) — compile once
+        // 3. Metadata stamps (database_columns incl. db_type) — compile once
         let batch = if !self.stamp_compiled {
             self.stamp_compiled = true;
             self.stamp_plan = compile_metadata_stamps(
                 &batch.schema(),
-                &self.column_options_cache,
+                &self.database_columns_cache,
             )?;
             match &self.stamp_plan {
                 Some(plan) => apply_metadata_stamp_plan(batch, plan)?,
@@ -1906,19 +1923,28 @@ impl SinkSchemaApplicator {
             }
         };
 
+        // 4. Structural changes from schema.database.columns — rename_to + drop.
+        //    Runs after metadata stamping so PK/type/etc. metadata follows the
+        //    column through the rename. drop removes the column entirely.
+        let batch = if !self.database_columns_cache.is_empty() {
+            apply_database_structural(batch, &self.database_columns_cache)?
+        } else {
+            batch
+        };
+
         Ok(batch)
     }
 
     /// Compute a DDL schema that includes DDL-only columns.
     ///
-    /// DDL-only columns are entries in `column_options` whose name does **not**
+    /// DDL-only columns are entries in `database_columns` whose name does **not**
     /// appear in the batch schema.  They are added to the DDL schema with
     /// appropriate `etl.*` metadata so that `generate_ddl()` /
     /// `mssql_create_table_sql()` / etc. emit them in the `CREATE TABLE`
     /// statement, while the data path never touches them.
     ///
     /// Returns `None` when there are no DDL-only columns (i.e. every
-    /// `column_options` key already exists in the batch).
+    /// `database_columns` key already exists in the batch).
     fn compute_ddl_schema(
         &self,
         batch_schema: &arrow::datatypes::SchemaRef,
@@ -1932,14 +1958,34 @@ impl SinkSchemaApplicator {
             .map(|f| f.name().to_lowercase())
             .collect();
 
-        // Collect DDL-only column names from column_options that are NOT in the batch.
+        // Collect DDL-only column names from database_columns that are NOT in the batch.
         // Iterate `ordered_column_names` (YAML insertion order) so the DDL
         // appends extra columns in the same order the user defined them.
+        // An entry whose `rename_to` is in the batch (post-rename) is also
+        // considered "in the batch" — the rename target IS the batch column,
+        // so we mustn't re-add the source-name key as a DDL-only column.
         let mut ddl_only_names: Vec<String> = Vec::new();
         for key in &self.ordered_column_names {
-            if !batch_names.contains(&key.to_lowercase()) {
-                ddl_only_names.push(key.clone());
+            let key_lower = key.to_lowercase();
+            if batch_names.contains(&key_lower) {
+                continue;
             }
+            // Check if this column's rename_to (or drop) accounts for it.
+            let info = self.database_columns_cache
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                .map(|(_, v)| v);
+            if let Some(co) = info {
+                if co.drop {
+                    continue;
+                }
+                if let Some(target) = &co.rename_to {
+                    if batch_names.contains(&target.to_lowercase()) {
+                        continue;
+                    }
+                }
+            }
+            ddl_only_names.push(key.clone());
         }
 
         if ddl_only_names.is_empty() {
@@ -1957,9 +2003,9 @@ impl SinkSchemaApplicator {
         for col_name in &ddl_only_names {
             let mut meta = std::collections::HashMap::new();
 
-            // Stamp column_options (incl. db_type).
+            // Stamp database_columns (incl. db_type).
             let mut nullable = true;
-            if let Some(co) = self.column_options_cache
+            if let Some(co) = self.database_columns_cache
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case(col_name))
                 .map(|(_, v)| v)
@@ -2538,7 +2584,7 @@ async fn run_component_inner(
                 let batch = applicator.apply(batch)?;
 
                 // On the first batch, compute DDL schema (batch fields +
-                // DDL-only columns from column_options) and push it to
+                // DDL-only columns from database_columns) and push it to
                 // the sink so CREATE TABLE includes them.
                 if !ddl_schema_set {
                     ddl_schema_set = true;
@@ -2700,23 +2746,41 @@ async fn run_component_inner(
             let mut rx         = in_rx.ok_or_else(|| anyhow::anyhow!(
                 "CsvFileSink '{id}' has no input channel — wiring bug"
             ))?;
-            let mut all_batches: Vec<RecordBatch> = Vec::new();
-            let mut first_seen = false;
-            while let Some(result) = rx.recv().await {
-                let batch = result?;
-                stats.rows_in += batch.num_rows();
-                if debug_step && !first_seen {
-                    debug_input(id, "input", std::slice::from_ref(&batch));
-                    first_seen = true;
-                }
-                all_batches.push(batch);
-            }
-            let bytes = potato_etl_common::csv_file::write_csv_to_bytes(
-                &all_batches, delimiter, has_header,
+
+            // Stream batches to a local staging file so peak RAM stays at one
+            // batch — never the whole dataset. On EOF we hand the file to the
+            // transport (rename for local, upload for remote).
+            let staging = std::env::temp_dir().join(format!(
+                "potato_etl_csv_{}.csv",
+                uuid::Uuid::new_v4()
+            ));
+            let mut writer = potato_etl_common::csv_file::CsvFileWriter::create(
+                &staging, delimiter, has_header,
             )?;
-            let written = all_batches.iter().map(|b| b.num_rows()).sum::<usize>();
-            transport.write_bytes(&path, &bytes).await?;
-            stats.rows_out += written;
+            let mut first_seen = false;
+            let staging_for_cleanup = staging.clone();
+            let stream_result: anyhow::Result<()> = async {
+                while let Some(result) = rx.recv().await {
+                    let batch = result?;
+                    stats.rows_in += batch.num_rows();
+                    if debug_step && !first_seen {
+                        debug_input(id, "input", std::slice::from_ref(&batch));
+                        first_seen = true;
+                    }
+                    writer.write(&batch)?;
+                    stats.rows_out += batch.num_rows();
+                    // batch dropped here — no accumulation.
+                }
+                writer.finish()?;
+                Ok(())
+            }.await;
+
+            if let Err(e) = stream_result {
+                let _ = std::fs::remove_file(&staging_for_cleanup);
+                return Err(e);
+            }
+
+            transport.write_from_local(&staging, &path).await?;
             stats.record_batch(pipeline_started);
             info!("[{id}] ✓ write_csv  {} rows to {path}", fmt_num(stats.rows_out));
             Ok(SpecKind::Sink)

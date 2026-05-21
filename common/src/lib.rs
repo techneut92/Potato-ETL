@@ -102,13 +102,14 @@ pub use http::{
 };
 pub use schema::{
     // per-column DDL hints for sinks
-    ColumnOption, ColumnOptionsMap, ForeignKey, LogicalType,
+    ColumnOption, DatabaseColumnsMap, ForeignKey, LogicalType,
     // whole-table structure
     TableSchema, ColumnDef,
     // application
-    apply_arrow_overrides, apply_rename, apply_column_options,
+    apply_arrow_type_overrides, apply_rename, apply_database_columns,
+    apply_database_structural,
     // compile-once plans
-    ArrowOverridesPlan, compile_arrow_overrides, apply_arrow_overrides_plan,
+    ArrowTypeOverridesPlan, compile_arrow_type_overrides, apply_arrow_type_overrides_plan,
     MetadataStampPlan,  compile_metadata_stamps,  apply_metadata_stamp_plan,
     // DDL + dialect
     generate_ddl, generate_ddl_with_schema, generate_post_create, DdlStatements, Scd2DdlInfo, SqlDialect,

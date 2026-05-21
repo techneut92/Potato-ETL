@@ -18,8 +18,16 @@ pub fn oracle_ident(name: &str) -> String {
 }
 
 /// Formats a qualified `schema.table` reference for Oracle.
+///
+/// An empty `schema_name` falls back to an unqualified `"TABLE"` reference —
+/// Oracle then resolves the table against the connecting user's schema.
+/// Emitting `""."TABLE"` would trigger `ORA-01741: illegal zero-length identifier`.
 pub fn oracle_qualified_table(schema_name: &str, table: &str) -> String {
-    format!("{}.{}", oracle_ident(schema_name), oracle_ident(table))
+    if schema_name.is_empty() {
+        oracle_ident(table)
+    } else {
+        format!("{}.{}", oracle_ident(schema_name), oracle_ident(table))
+    }
 }
 
 #[derive(Clone)]
@@ -178,6 +186,16 @@ mod tests {
         assert_eq!(
             oracle_qualified_table("public", "order"),
             "\"public\".\"order\""
+        );
+    }
+
+    #[test]
+    fn qualified_table_empty_schema_unqualified() {
+        // Empty schema → unqualified reference (Oracle resolves to user's schema).
+        // `""."TABLE"` would raise ORA-01741.
+        assert_eq!(
+            oracle_qualified_table("", "EXT_GENESYS_AUDITS"),
+            "EXT_GENESYS_AUDITS"
         );
     }
 }

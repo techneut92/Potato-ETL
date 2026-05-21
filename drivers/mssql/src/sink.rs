@@ -502,6 +502,45 @@ fn format_duration_us(us: i64) -> String {
 
 // ── SQL generators ────────────────────────────────────────────────────────────
 
+/// True if any column name in `schema` is a T-SQL reserved word.
+///
+/// tiberius's `bulk_insert(table)` sends an `INSERT BULK <table> (col type, …)`
+/// statement to the server unquoted, so columns named after reserved words
+/// (e.g. `KEY`, `USER`, `ORDER`) trigger a syntax error. When this returns
+/// `true` we route through `do_bulk_insert_partial`, which uses an explicit
+/// bracketed column list (`[KEY]`) and avoids the issue.
+fn schema_has_reserved_column(schema: &SchemaRef) -> bool {
+    static RESERVED: &[&str] = &[
+        "ABSOLUTE","ACTION","ADD","ALL","ALTER","AND","ANY","AS","ASC","AUTHORIZATION",
+        "BACKUP","BEGIN","BETWEEN","BREAK","BROWSE","BULK","BY","CASCADE","CASE","CHECK",
+        "CHECKPOINT","CLOSE","CLUSTERED","COALESCE","COLLATE","COLUMN","COMMIT","COMPUTE",
+        "CONSTRAINT","CONTAINS","CONTAINSTABLE","CONTINUE","CONVERT","CREATE","CROSS",
+        "CURRENT","CURRENT_DATE","CURRENT_TIME","CURRENT_TIMESTAMP","CURRENT_USER","CURSOR",
+        "DATABASE","DBCC","DEALLOCATE","DECLARE","DEFAULT","DELETE","DENY","DESC","DISK",
+        "DISTINCT","DISTRIBUTED","DOUBLE","DROP","DUMP","ELSE","END","ERRLVL","ESCAPE",
+        "EXCEPT","EXEC","EXECUTE","EXISTS","EXIT","EXTERNAL","FETCH","FILE","FILLFACTOR",
+        "FOR","FOREIGN","FREETEXT","FREETEXTTABLE","FROM","FULL","FUNCTION","GOTO","GRANT",
+        "GROUP","HAVING","HOLDLOCK","IDENTITY","IDENTITY_INSERT","IDENTITYCOL","IF","IN",
+        "INDEX","INNER","INSERT","INTERSECT","INTO","IS","JOIN","KEY","KILL","LEFT","LIKE",
+        "LINENO","LOAD","MERGE","NATIONAL","NOCHECK","NONCLUSTERED","NOT","NULL","NULLIF",
+        "OF","OFF","OFFSETS","ON","OPEN","OPENDATASOURCE","OPENQUERY","OPENROWSET","OPENXML",
+        "OPTION","OR","ORDER","OUTER","OVER","PERCENT","PIVOT","PLAN","PRECISION","PRIMARY",
+        "PRINT","PROC","PROCEDURE","PUBLIC","RAISERROR","READ","READTEXT","RECONFIGURE",
+        "REFERENCES","REPLICATION","RESTORE","RESTRICT","RETURN","REVERT","REVOKE","RIGHT",
+        "ROLLBACK","ROWCOUNT","ROWGUIDCOL","RULE","SAVE","SCHEMA","SECURITYAUDIT","SELECT",
+        "SEMANTICKEYPHRASETABLE","SEMANTICSIMILARITYDETAILSTABLE","SEMANTICSIMILARITYTABLE",
+        "SESSION_USER","SET","SETUSER","SHUTDOWN","SOME","STATISTICS","SYSTEM_USER","TABLE",
+        "TABLESAMPLE","TEXTSIZE","THEN","TO","TOP","TRAN","TRANSACTION","TRIGGER","TRUNCATE",
+        "TRY_CONVERT","TSEQUAL","UNION","UNIQUE","UNPIVOT","UPDATE","UPDATETEXT","USE","USER",
+        "VALUES","VARYING","VIEW","WAITFOR","WHEN","WHERE","WHILE","WITH","WITHIN GROUP",
+        "WRITETEXT",
+    ];
+    schema.fields().iter().any(|f| {
+        let upper = f.name().to_ascii_uppercase();
+        RESERVED.iter().any(|kw| *kw == upper)
+    })
+}
+
 fn staging_sql_type(dt: &DataType) -> &'static str {
     match dt {
         DataType::Boolean                                      => "BIT",
@@ -815,7 +854,10 @@ impl MssqlWriteDB {
             let rows = std::mem::take(&mut self.row_buffer);
             let dest = if staging { "#etl_bulk_stage" } else { full_table.as_str() };
             let c = self.client.as_mut().unwrap();
-            let is_partial = !staging && self.alignment.as_ref().map(|a| !a.is_identity()).unwrap_or(false);
+            let is_partial = !staging && (
+                self.alignment.as_ref().map(|a| !a.is_identity()).unwrap_or(false)
+                || self.saved_schema.as_ref().map(|s| schema_has_reserved_column(s)).unwrap_or(false)
+            );
             let insert_result = if is_partial {
                 if let Some(ref schema) = self.saved_schema {
                     do_bulk_insert_partial(c, dest, schema, rows).await
@@ -976,12 +1018,18 @@ impl MssqlWriteDB {
             if bcp_needs_init {
                 use_staging = self.bcp_uses_staging();
                 if self.client.is_none() { self.client = Some(self.params.connect().await?); }
+                let table_already_exists = if is_create_if_not_exists && !is_drop_and_replace {
+                    let client = self.client.as_mut().unwrap();
+                    introspect_table_columns(client, &schema_name, &table).await?.is_some()
+                } else {
+                    false
+                };
                 {
                     let client = self.client.as_mut().unwrap();
                     if is_drop_and_replace {
                         client.simple_query(format!("DROP TABLE IF EXISTS {full_table}")).await?.into_results().await?;
                     }
-                    if is_drop_and_replace || is_create_if_not_exists {
+                    if (is_drop_and_replace || is_create_if_not_exists) && !table_already_exists {
                         let db_config = self.cfg.database_schema_config.as_ref();
                         let stmts = generate_ddl_with_schema(&table, Some(&schema_name), &ddl_schema, SqlDialect::Mssql, None, db_config, DdlOptions::default());
                         for stmt in &stmts.pre_create {
@@ -996,6 +1044,8 @@ impl MssqlWriteDB {
                                 }
                             }
                         }
+                    } else if table_already_exists {
+                        tracing::info!(table = %self.cfg.table, "MSSQL table exists — skipping DDL (bcp)");
                     }
                     if is_clear_and_insert && !use_staging {
                         client.simple_query(format!("TRUNCATE TABLE {full_table}")).await?.into_results().await?;
@@ -1074,12 +1124,22 @@ impl MssqlWriteDB {
         // ── DDL + TRUNCATE (first batch) ──────────────────────────────────
         if !table_prepared {
             let did_drop_and_create = is_drop_and_replace;
+            // For `create_if_not_exists`, probe the table first. If it exists,
+            // skip ALL DDL — including post_create constraints/indexes whose
+            // definitions may be incompatible with the existing schema (e.g.
+            // a NVARCHAR(MAX) PK that fails the SQL Server key-length check).
+            let table_already_exists = if is_create_if_not_exists && !is_drop_and_replace {
+                let client = self.client.as_mut().unwrap();
+                introspect_table_columns(client, &schema_name, &table).await?.is_some()
+            } else {
+                false
+            };
             {
                 let client = self.client.as_mut().unwrap();
                 if is_drop_and_replace {
                     client.simple_query(format!("DROP TABLE IF EXISTS {full_table}")).await?.into_results().await?;
                 }
-                if is_drop_and_replace || is_create_if_not_exists {
+                if (is_drop_and_replace || is_create_if_not_exists) && !table_already_exists {
                     let db_config = self.cfg.database_schema_config.as_ref();
                     let stmts = generate_ddl_with_schema(&table, Some(&schema_name), &ddl_schema, SqlDialect::Mssql, None, db_config, DdlOptions::default());
                     for stmt in &stmts.pre_create {
@@ -1101,6 +1161,8 @@ impl MssqlWriteDB {
                     } else {
                         tracing::info!(table = %self.cfg.table, "MSSQL CREATE TABLE IF NOT EXISTS applied");
                     }
+                } else if table_already_exists {
+                    tracing::info!(table = %self.cfg.table, "MSSQL table exists — skipping DDL");
                 }
                 if is_clear_and_insert && !did_drop_and_create {
                     client.simple_query(format!("TRUNCATE TABLE {full_table}")).await?.into_results().await?;
@@ -1164,7 +1226,10 @@ impl MssqlWriteDB {
         if self.row_buffer.len() >= self.bulk_threshold {
             let rows   = std::mem::take(&mut self.row_buffer);
             let client = self.client.as_mut().unwrap();
-            let is_partial = !staging && self.alignment.as_ref().map(|a| !a.is_identity()).unwrap_or(false);
+            let is_partial = !staging && (
+                self.alignment.as_ref().map(|a| !a.is_identity()).unwrap_or(false)
+                || self.saved_schema.as_ref().map(|s| schema_has_reserved_column(s)).unwrap_or(false)
+            );
             if is_partial {
                 if let Some(ref schema) = self.saved_schema {
                     do_bulk_insert_partial(client, dest, schema, rows).await?;
@@ -1218,7 +1283,19 @@ impl MssqlWriteDB {
                 }).await??;
 
             }
-            if is_drop_and_replace || is_create_if_not_exists {
+            let table_already_exists = if is_create_if_not_exists && !is_drop_and_replace {
+                let sn = schema_name.clone();
+                let tn = table.clone();
+                let sw = SendWriter::new(self.odbc_writer.as_ref().unwrap());
+                let cols = tokio::task::spawn_blocking(move || {
+                    let w = unsafe { sw.as_ref() };
+                    w.introspect_table_columns(&sn, &tn)
+                }).await??;
+                cols.is_some()
+            } else {
+                false
+            };
+            if (is_drop_and_replace || is_create_if_not_exists) && !table_already_exists {
                 let db_config = self.cfg.database_schema_config.as_ref();
                 let stmts = generate_ddl_with_schema(&table, Some(&schema_name), &ddl_schema, SqlDialect::Mssql, None, db_config, DdlOptions::default());
                 for pre_stmt in &stmts.pre_create {
@@ -1256,6 +1333,8 @@ impl MssqlWriteDB {
                 } else {
                     tracing::info!(table = %self.cfg.table, "MSSQL CREATE TABLE IF NOT EXISTS applied (odbc)");
                 }
+            } else if table_already_exists {
+                tracing::info!(table = %self.cfg.table, "MSSQL table exists — skipping DDL (odbc)");
             }
 
             // Compute column alignment via ODBC introspection

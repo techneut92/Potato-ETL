@@ -134,7 +134,12 @@ impl SourceBuilder for MySqlReadDB {
                 };
                 tracing::debug!(sql = %full_sql, "MySqlReadDB full-scan stream");
                 use futures::TryStreamExt as _;
-                let mut row_stream = sqlx::query(&full_sql).fetch(&pool);
+                // Use sqlx::raw_sql (text protocol) instead of sqlx::query
+                // (binary/prepared protocol). The binary BinaryRow decoder
+                // in sqlx-mysql panics on certain wide-column packets
+                // ("cannot advance past `remaining`"). The text protocol
+                // ships values as strings and never enters that decoder.
+                let mut row_stream = sqlx::raw_sql(&full_sql).fetch(&pool);
                 let mut buf: Vec<MySqlRow> = Vec::with_capacity(batch_size);
                 while let Some(row) = row_stream.try_next().await? {
                     buf.push(row);

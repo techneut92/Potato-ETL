@@ -5,7 +5,7 @@
 //! | Type | Purpose |
 //! |---|---|
 //! | [`ColumnOption`] | Per-column DDL hints for sinks (PK, unique, index, etc.) |
-//! | [`ColumnOptionsMap`] | `HashMap<String, ColumnOption>` — canonical alias |
+//! | [`DatabaseColumnsMap`] | `HashMap<String, ColumnOption>` — canonical alias |
 //! | [`ForeignKey`] | FK reference used by [`ColumnOption`] |
 //! | [`LogicalType`] | Semantic type (JSON, UUID, Currency, …) for DDL resolution |
 
@@ -142,7 +142,16 @@ pub struct ColumnOption {
     /// `ENUM(...)` (MySQL), or a `CHECK` constraint (MSSQL/Oracle/Databricks).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enum_values: Vec<String>,
+    /// Output name when this column is renamed during schema apply.
+    /// The map key (this column's source-side name) is matched
+    /// case-insensitively; the rename target is written verbatim.
+    /// Field metadata follows the column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename_to: Option<String>,
+    /// Drop this column from the batch during schema apply.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drop: bool,
 }
 
 /// Type alias for the per-column options map on sinks.
-pub type ColumnOptionsMap = HashMap<String, ColumnOption>;
+pub type DatabaseColumnsMap = HashMap<String, ColumnOption>;

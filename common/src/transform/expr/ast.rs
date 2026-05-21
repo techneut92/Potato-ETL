@@ -19,6 +19,10 @@ pub enum Expr {
     Index  { expr: Box<Expr>, index: Box<Expr> },
     /// `$name` — reference to a pipeline environment variable.
     EnvVar(String),
+    /// `$step.col` — reference to a column in the named input step's batch.
+    /// `$source.col` is the conventional form for "the current step's input"
+    /// when only one input is involved. Lookup is case-insensitive.
+    ColumnRef { step: String, col: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -214,6 +218,29 @@ impl Parser {
             }
             Tok::EnvVar(name) => {
                 self.advance();
+                // `$step.col` → column ref into a named input step's batch.
+                // `$source.col` is the conventional name when there's only one input.
+                if self.eat(&Tok::Dot) {
+                    let col = self.expect_ident()?;
+                    return Ok(Expr::ColumnRef { step: name, col });
+                }
+                // `$fn(args)` → function call (explicit-sigil form, same semantics
+                // as the bare `fn(args)` form used inside map / filter / aggregate
+                // expressions). Convenient at `value:` where bare identifiers are
+                // literals.
+                if self.eat(&Tok::LParen) {
+                    let mut args = Vec::new();
+                    if self.peek() != &Tok::RParen {
+                        args.push(self.or_expr()?);
+                        while self.eat(&Tok::Comma) {
+                            args.push(self.or_expr()?);
+                        }
+                    }
+                    if !self.eat(&Tok::RParen) {
+                        anyhow::bail!("expected ')' after function arguments");
+                    }
+                    return Ok(Expr::Call { func: name.to_lowercase(), args });
+                }
                 Ok(Expr::EnvVar(name))
             }
             other => anyhow::bail!("unexpected token in expression: {other:?}"),

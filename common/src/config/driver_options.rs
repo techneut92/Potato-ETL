@@ -195,10 +195,17 @@ impl MssqlOptions {
 // ── OracleOptions ─────────────────────────────────────────────────────────────
 
 /// Connection options specific to **Oracle Database**.
-///
-/// Placeholder for future options as the oracle driver matures.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct OracleOptions {}
+pub struct OracleOptions {
+    /// Use a session-scoped staging table for `upsert` / `merge_delete` writes.
+    ///
+    /// Each batch is bulk-INSERTed into `_ETL_STG_<target>`; at flush a single
+    /// set-based `MERGE INTO target USING staging` runs. Trades one DDL +
+    /// staging space for orders-of-magnitude faster server-side merging vs the
+    /// default per-row `MERGE INTO target USING (SELECT … FROM DUAL)` path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staging_table: Option<bool>,
+}
 
 // ── MySqlOptions ──────────────────────────────────────────────────────────────
 
@@ -435,6 +442,15 @@ pub struct StepDriverOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bcp_staging: Option<bool>,
 
+    /// Use a session-scoped staging table for `upsert` / `merge_delete` writes.
+    ///
+    /// Cross-driver flag honored by:
+    /// - **Oracle** — bulk-INSERT into staging, single set-based MERGE at flush.
+    /// - **Postgres** — `staging_table` in `PostgresOptions` takes precedence
+    ///   when set; this is the top-level fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staging_table: Option<bool>,
+
     /// Rows fetched per OCI round-trip (Oracle only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefetch_rows: Option<u32>,
@@ -475,6 +491,10 @@ pub struct StepDriverOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mysql: Option<MySqlOptions>,
 
+    /// Oracle-specific connection options (staging-table flow, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oracle: Option<OracleOptions>,
+
     /// SQL statements executed at the start of each source/sink operation.
     ///
     /// This is a driver-agnostic field that propagates `init_sql` from
@@ -493,6 +513,7 @@ impl StepDriverOptions {
         self.mode.is_none()
             && self.bcp_path.is_none()
             && self.bcp_staging.is_none()
+            && self.staging_table.is_none()
             && self.prefetch_rows.is_none()
             && self.fetch_array_size.is_none()
             && self.direct_path.is_none()
@@ -503,6 +524,7 @@ impl StepDriverOptions {
             && self.postgres.is_none()
             && self.mssql.is_none()
             && self.mysql.is_none()
+            && self.oracle.is_none()
             && self.init_sql.is_empty()
     }
 
@@ -533,6 +555,7 @@ impl StepDriverOptions {
         merge_opt!(mode);
         merge_opt!(bcp_path);
         merge_opt!(bcp_staging);
+        merge_opt!(staging_table);
         merge_opt!(prefetch_rows);
         merge_opt!(fetch_array_size);
         merge_opt!(direct_path);
@@ -555,6 +578,15 @@ impl StepDriverOptions {
         // MySQL: no field-level merge needed yet — just inherit if absent.
         match (&self.mysql, &conn_defaults.mysql) {
             (None, Some(conn_my)) => self.mysql = Some(conn_my.clone()),
+            _ => {}
+        }
+        // Oracle: inherit when step is absent; OracleOptions fields use Option
+        // so step-level None falls back to connection default.
+        match (&mut self.oracle, &conn_defaults.oracle) {
+            (Some(step_or), Some(conn_or)) => {
+                if step_or.staging_table.is_none() { step_or.staging_table = conn_or.staging_table; }
+            }
+            (None, Some(conn_or)) => self.oracle = Some(conn_or.clone()),
             _ => {}
         }
         // Top-level init_sql: inherit when step is empty.

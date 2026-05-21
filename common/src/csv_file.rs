@@ -174,6 +174,10 @@ pub fn write_csv_file(
 ///
 /// Transport-agnostic: returns raw bytes for
 /// [`FileTransport::write_bytes`](crate::file_transport::FileTransport::write_bytes).
+///
+/// **RAM warning:** this buffers the entire dataset. Sinks should prefer
+/// [`CsvFileWriter`] (per-batch streaming to a local file) and then hand the
+/// file to [`FileTransport::write_from_local`](crate::file_transport::FileTransport::write_from_local).
 pub fn write_csv_to_bytes(
     batches:    &[RecordBatch],
     delimiter:  u8,
@@ -197,6 +201,59 @@ pub fn write_csv_to_bytes(
     }
 
     Ok(buf)
+}
+
+/// Streaming CSV writer — writes `RecordBatch`es one at a time to a local
+/// file. Designed for sinks that must not accumulate the dataset in RAM.
+///
+/// The header (if enabled) is emitted with the first batch by the underlying
+/// `arrow_csv::Writer`. Drop the writer (or call [`finish`](Self::finish)) to
+/// flush the `BufWriter` before handing the file off.
+pub struct CsvFileWriter {
+    inner: arrow_csv::Writer<std::io::BufWriter<std::fs::File>>,
+}
+
+impl CsvFileWriter {
+    /// Create the file at `path` and prepare to stream batches into it.
+    /// Parent directories are created automatically.
+    pub fn create(
+        path:       &std::path::Path,
+        delimiter:  u8,
+        has_header: bool,
+    ) -> anyhow::Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                anyhow::anyhow!(
+                    "write_csv: cannot create staging directory '{}': {e}",
+                    parent.display(),
+                )
+            })?;
+        }
+        let file = std::fs::File::create(path).map_err(|e| {
+            anyhow::anyhow!("write_csv: cannot create '{}': {e}", path.display())
+        })?;
+        let inner = arrow_csv::WriterBuilder::new()
+            .with_delimiter(delimiter)
+            .with_header(has_header)
+            .build(std::io::BufWriter::new(file));
+        Ok(Self { inner })
+    }
+
+    /// Append one `RecordBatch` to the file.
+    pub fn write(&mut self, batch: &RecordBatch) -> anyhow::Result<()> {
+        self.inner
+            .write(batch)
+            .map_err(|e| anyhow::anyhow!("write_csv: error writing batch: {e}"))
+    }
+
+    /// Flush and close the underlying file.
+    pub fn finish(self) -> anyhow::Result<()> {
+        use std::io::Write;
+        let mut buf = self.inner.into_inner();
+        buf.flush()
+            .map_err(|e| anyhow::anyhow!("write_csv: error flushing buffer: {e}"))?;
+        Ok(())
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -251,6 +308,43 @@ mod tests {
             ..Default::default()
         };
         assert!(read_csv_file(&config).is_err());
+    }
+
+    #[test]
+    fn test_csv_file_writer_streams_per_batch() {
+        let dir = std::env::temp_dir().join("potato_etl_test_csv_stream");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("streamed.csv");
+        let _ = std::fs::remove_file(&path);
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id",   DataType::Int64, false),
+            Field::new("name", DataType::Utf8,  false),
+        ]));
+        let batch1 = RecordBatch::try_new(Arc::clone(&schema), vec![
+            Arc::new(Int64Array::from(vec![1, 2])) as _,
+            Arc::new(StringArray::from(vec!["Alice", "Bob"])) as _,
+        ]).unwrap();
+        let batch2 = RecordBatch::try_new(Arc::clone(&schema), vec![
+            Arc::new(Int64Array::from(vec![3])) as _,
+            Arc::new(StringArray::from(vec!["Charlie"])) as _,
+        ]).unwrap();
+
+        let mut writer = CsvFileWriter::create(&path, b',', true).unwrap();
+        writer.write(&batch1).unwrap();
+        writer.write(&batch2).unwrap();
+        writer.finish().unwrap();
+
+        // Read back via the existing reader — confirms file is well-formed.
+        let read_config = CsvReadConfig {
+            path: path.to_str().unwrap().to_string(),
+            delimiter: b',',
+            has_header: true,
+            batch_size: 100,
+        };
+        let batches = read_csv_file(&read_config).unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 3);
     }
 
     #[test]

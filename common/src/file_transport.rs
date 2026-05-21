@@ -73,6 +73,33 @@ pub trait FileTransport: Send + Sync {
     /// Write `data` to a file at `path`, creating or overwriting.
     async fn write_bytes(&self, path: &str, data: &[u8]) -> anyhow::Result<()>;
 
+    /// Upload (or move) a fully-written local file to `dest_path`.
+    ///
+    /// Sinks that stream to a local staging file call this on completion so
+    /// the bytes leave RAM via the filesystem, not via a `Vec<u8>` buffer.
+    /// The local file is consumed (moved/deleted) on success.
+    ///
+    /// Default implementation reads the staging file and falls back to
+    /// [`write_bytes`] — correct for any transport but still buffers the
+    /// whole file. Transports should override when a streaming upload is
+    /// available; [`LocalTransport`] overrides with `rename` so a local
+    /// destination involves zero buffering.
+    async fn write_from_local(
+        &self,
+        local_path: &std::path::Path,
+        dest_path: &str,
+    ) -> anyhow::Result<()> {
+        let data = std::fs::read(local_path).map_err(|e| {
+            anyhow::anyhow!(
+                "write_from_local: cannot read staging file '{}': {e}",
+                local_path.display(),
+            )
+        })?;
+        self.write_bytes(dest_path, &data).await?;
+        let _ = std::fs::remove_file(local_path);
+        Ok(())
+    }
+
     /// Check whether a file exists at `path`.
     async fn exists(&self, path: &str) -> anyhow::Result<bool>;
 
@@ -151,6 +178,37 @@ impl FileTransport for LocalTransport {
         }
         std::fs::write(path, data)
             .map_err(|e| anyhow::anyhow!("local: cannot write '{path}': {e}"))
+    }
+
+    async fn write_from_local(
+        &self,
+        local_path: &std::path::Path,
+        dest_path: &str,
+    ) -> anyhow::Result<()> {
+        if let Some(parent) = std::path::Path::new(dest_path).parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                anyhow::anyhow!("local: cannot create directory for '{dest_path}': {e}")
+            })?;
+        }
+        match std::fs::rename(local_path, dest_path) {
+            Ok(()) => Ok(()),
+            // Cross-device rename — fall back to copy + delete.
+            Err(_) => {
+                std::fs::copy(local_path, dest_path).map_err(|e| {
+                    anyhow::anyhow!(
+                        "local: cannot copy '{}' to '{dest_path}': {e}",
+                        local_path.display(),
+                    )
+                })?;
+                std::fs::remove_file(local_path).map_err(|e| {
+                    anyhow::anyhow!(
+                        "local: cannot remove staging file '{}': {e}",
+                        local_path.display(),
+                    )
+                })?;
+                Ok(())
+            }
+        }
     }
 
     async fn exists(&self, path: &str) -> anyhow::Result<bool> {
@@ -588,6 +646,27 @@ mod tests {
 
         transport.delete(path_str).await.unwrap();
         assert!(!transport.exists(path_str).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_local_write_from_local_renames() {
+        let dir = std::env::temp_dir().join("potato_etl_test_write_from_local");
+        std::fs::create_dir_all(&dir).unwrap();
+        let staging = dir.join("staging.bin");
+        let dest = dir.join("dest.bin");
+        let _ = std::fs::remove_file(&dest);
+        std::fs::write(&staging, b"streamed bytes").unwrap();
+
+        let transport = LocalTransport;
+        transport
+            .write_from_local(&staging, dest.to_str().unwrap())
+            .await
+            .unwrap();
+
+        assert!(!staging.exists(), "staging file should be consumed");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"streamed bytes");
+
+        let _ = std::fs::remove_file(&dest);
     }
 
     #[tokio::test]

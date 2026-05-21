@@ -46,8 +46,8 @@ Expressions are used in `map` columns, `filter` conditions, `aggregate` metrics,
 
 | Function | Return type | Description |
 |---|---|---|
-| `now()` | Timestamp[us, UTC] | Current UTC time, same value for all rows in a batch |
-| `now_naive()` | Timestamp[us] | Current UTC time without timezone info |
+| `now()` | Timestamp[us] | Current **local** wall-clock time, naive (no timezone). Same value for all rows in a batch. Mirrors Python's `datetime.now()` so pipelines writing into MSSQL `DATETIME`/`DATETIME2` columns match legacy Python ETLs. |
+| `utcnow()` | Timestamp[us, UTC] | Current UTC time, tz-aware |
 | `run_ts()` | Timestamp[us, UTC] | Pipeline start time -- same across all batches in a run |
 | `run_ts_naive()` | Timestamp[us] | Pipeline start time without timezone info |
 | `epoch_to_timestamp(col)` | Timestamp[us, UTC] | Convert unix epoch integer (seconds) to UTC timestamp. Aliases: `from_epoch`, `from_unix`. |
@@ -95,6 +95,7 @@ Drop the `, UTC` part for a naive (timezone-unaware) timestamp: `cast(col, "time
 | `lower(col)` | `lcase` | Utf8 | Lowercase |
 | `trim(col)` | -- | Utf8 | Strip leading/trailing whitespace |
 | `length(col)` | `len`, `char_length` | Int32 | UTF-8 character count |
+| `truncate(col, n)` | `left` | Utf8 | First `n` UTF-8 characters of `col` (shorter strings pass through, NULLs stay NULL). `n` must be a non-negative integer literal. Useful for fitting fixed-width target columns (e.g. truncate to 4000 for an Oracle `VARCHAR2(4000)` or MSSQL `NVARCHAR(4000)`). |
 | `concat(a, b, ...)` | -- | Utf8 | Concatenate values (any number of arguments) |
 
 ## JSON functions
@@ -119,7 +120,7 @@ Drop the `, UTC` part for a naive (timezone-unaware) timestamp: `cast(col, "time
 |---|---|---|
 | `cast(col, "type")` | varies | Cast to an Arrow type string, e.g. `"int32"`, `"float64"`, `"utf8"`, `"timestamp"` |
 
-**Supported type strings** (used in `cast()`, `arrow_overrides` on sources, and `arrow_overrides` on sinks):
+**Supported type strings** (used in `cast()` and `schema.arrow.columns.<col>.type`):
 
 | Plain name | Aliases | Arrow type |
 |---|---|---|

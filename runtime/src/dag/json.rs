@@ -202,7 +202,7 @@ pub(crate) enum StepDef {
         url: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         conn: Option<String>,
-        /// Source-side schema settings: `arrow_overrides`, `normalize_columns`, `exclude`.
+        /// Source-side schema settings: `arrow_type_overrides`, `normalize_columns`, `exclude`.
         /// Flattened — these fields appear at the same YAML/JSON level as `url`, etc.
         #[serde(flatten)]
         source_schema: SourceSchemaConfig,
@@ -253,7 +253,7 @@ pub(crate) enum StepDef {
         /// `null` or `""` means the top-level value is the array.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         data_path: Option<String>,
-        /// Source-side schema settings: `arrow_overrides`, `normalize_columns`, `exclude`.
+        /// Source-side schema settings: `arrow_type_overrides`, `normalize_columns`, `exclude`.
         #[serde(flatten)]
         source_schema: SourceSchemaConfig,
         /// Per-step read batch size.
@@ -1119,7 +1119,10 @@ impl Dag {
                  to enable secret resolution."
             );
         }
-        let doc: PipelineDoc = serde_json::from_str(json)
+        let value: serde_json::Value = serde_json::from_str(json)
+            .map_err(|e| anyhow::anyhow!("JSON parse error: {e}"))?;
+        crate::dag::yaml::reject_legacy_step_fields_json(&value)?;
+        let doc: PipelineDoc = serde_json::from_value(value)
             .map_err(|e| anyhow::anyhow!("JSON parse error: {e}"))?;
         build_dag_from_doc(doc)
     }
@@ -1146,6 +1149,8 @@ impl Dag {
         if let serde_yaml_ng::Value::Mapping(ref mut map) = value {
             map.remove(&serde_yaml_ng::Value::String("secrets".into()));
         }
+
+        crate::dag::yaml::reject_legacy_step_fields_yaml(&value)?;
 
         let doc: PipelineDoc = serde_yaml_ng::from_value(value)
             .map_err(|e| anyhow::anyhow!("JSON parse error (after secret resolution): {e}"))?;

@@ -182,7 +182,7 @@ pub fn mssql_type_map() -> HashMap<&'static str, DataType> {
 /// Default Oracle type → Arrow `DataType` mapping.
 ///
 /// Oracle has no native boolean before 23c — `NUMBER(1)` is the convention.
-/// Use `arrow_overrides` to map NUMBER columns to boolean.
+/// Use `arrow_type_overrides` to map NUMBER columns to boolean.
 pub fn oracle_type_map() -> HashMap<&'static str, DataType> {
     [
         ("NUMBER",    DataType::Float64),  // may be int or decimal; use overrides for precision

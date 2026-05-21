@@ -9,7 +9,18 @@ pub async fn mysql_pool_with_init_sql(
     max_connections: u32,
     init_sql:        &[String],
 ) -> anyhow::Result<sqlx::MySqlPool> {
-    use sqlx::mysql::MySqlPoolOptions;
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+    use sqlx::ConnectOptions;
+    use tracing::log::LevelFilter;
+    use std::time::Duration;
+
+    // Silence sqlx's per-statement "slow statement" warnings — for any
+    // sizable source query they fire at WARN with the entire SQL text
+    // (e.g. an audit SELECT with SHA256/CONCAT over 280k+ rows) and flood
+    // the log. Our driver layer emits its own per-batch stats.
+    let connect_opts: MySqlConnectOptions = conn_str.parse::<MySqlConnectOptions>()?
+        .log_slow_statements(LevelFilter::Off, Duration::from_secs(60))
+        .log_statements(LevelFilter::Off);
 
     let mut opts = MySqlPoolOptions::new().max_connections(max_connections);
 
@@ -35,7 +46,7 @@ pub async fn mysql_pool_with_init_sql(
         });
     }
 
-    let pool = opts.connect(conn_str).await?;
+    let pool = opts.connect_with(connect_opts).await?;
     Ok(pool)
 }
 

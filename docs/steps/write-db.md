@@ -34,9 +34,6 @@ Write rows to a database table. Supports multiple write modes, automatic table c
 | `create_table` | no | `never` | Auto-create the target table (see below) |
 | `batch_size` | no | global | Sub-chunk incoming batches to this size before writing |
 | `schema` | no | -- | Unified schema block with `schema.arrow.columns` and `schema.database.columns` / `indexes` / `constraints` (see [Unified schema block](#unified-schema-block)) |
-| `values` | no | `{}` | Column mapping -- batch col rename, env var injection, or explicit NULL (see below). Formerly named `columns` (renamed in code; the old name is not accepted). |
-| `arrow_overrides` | no | `{}` | Legacy flat Arrow type overrides. Prefer `schema.arrow.columns`. |
-| `column_options` | no | `{}` | Legacy flat DDL hints (see below). Prefer `schema.database.columns`. |
 | `options` | no | -- | Per-step driver options (see [Step driver options](./driver-options.md)) |
 
 ## Write modes
@@ -49,7 +46,7 @@ Write rows to a database table. Supports multiple write modes, automatic table c
 | `merge_delete` | Like upsert, but also deletes target rows absent from the source |
 | `truncate` | TRUNCATE the table first, then insert everything |
 
-For `upsert`, `insert_ignore`, and `merge_delete`, the merge key is derived from columns marked with `primary_key: true` in `column_options`.
+For `upsert`, `insert_ignore`, and `merge_delete`, the merge key is derived from columns marked with `primary_key: true` in `schema.database.columns`.
 
 ## Auto table creation
 
@@ -63,7 +60,7 @@ DDL is generated from the Arrow schema of the first batch. Column types, nullabi
 
 ## Unified schema block
 
-The `schema:` block is the preferred way to configure Arrow type casts, DDL column types, indexes, and constraints in a single structured block. It replaces the legacy flat `arrow_overrides`, `column_options`, and the removed `type_override` fields.
+The `schema:` block is the canonical way to configure Arrow type casts, DDL column types, indexes, and constraints in a single structured block.
 
 ```yaml
 - id: sink
@@ -86,7 +83,7 @@ The `schema:` block is the preferred way to configure Arrow type casts, DDL colu
     database:
       columns:
         employee_id:
-          type: VARCHAR(50)       # SQL type for DDL (replaces old type_override)
+          type: VARCHAR(50)       # SQL type override for DDL
           primary_key: true
           nullable: false
           generated: true         # IDENTITY / SERIAL / AUTO_INCREMENT
@@ -117,60 +114,54 @@ The `schema:` block is the preferred way to configure Arrow type casts, DDL colu
           check: "status IN ('active','inactive','terminated')"
 ```
 
-**`schema.arrow.columns`** — per-column Arrow type overrides applied at the sink boundary before writing. Same semantics as the legacy flat `arrow_overrides`.
+**`schema.arrow.columns`** — per-column Arrow type overrides applied at the sink boundary before writing.
 
-**`schema.database.columns`** — per-column DDL hints. The `type` field replaces the old standalone `type_override` map; other fields (`primary_key`, `nullable`, `unique`, `generated`, `check_expr`, `default_expr`, `on_update_expr`, `foreign_key`, `description`) are the same. Note: `index` is **not** available here — use `schema.database.indexes` for named indexes instead.
+**`schema.database.columns`** — per-column DDL hints: `type`, `primary_key`, `nullable`, `unique`, `generated`, `check_expr`, `default_expr`, `on_update_expr`, `foreign_key`, `description`, `enum_values`. Note: `index` is **not** available here — use `schema.database.indexes` for named indexes instead.
 
 **`schema.database.indexes`** — named, multi-column indexes emitted as `CREATE INDEX` after table creation.
 
 **`schema.database.constraints`** — named table-level constraints emitted as `ALTER TABLE ... ADD CONSTRAINT` after table creation.
 
-> **Legacy fields:** The flat `arrow_overrides`, `column_options`, and `values` fields still work alongside the `schema:` block. When both are present, `schema.arrow.columns` wins over flat `arrow_overrides`, and `schema.database.columns` wins over flat `column_options`, for columns specified in both.
+## Per-column DDL hints (`schema.database.columns`)
 
-> **Removed:** The standalone `type_override` field has been removed. Use `schema.database.columns.<col>.type` (or the legacy `column_options.<col>.db_type`) instead.
-
-## Column options (legacy flat form)
-
-Per-column DDL hints. Prefer `schema.database.columns` for new pipelines.
-
-## Column options
-
-Per-column DDL hints for auto-created tables:
+Drives the `CREATE TABLE` statement (when `create_table: if_not_exists` / `replace`) and the merge-key selection for upsert modes.
 
 ```yaml
-  column_options:
-    employee_id:
-      primary_key: true           # part of the primary key
-      nullable: false             # NOT NULL
-      generated: true             # IDENTITY / SERIAL / AUTO_INCREMENT
-    email:
-      unique: true                # UNIQUE constraint
-      nullable: false
-    salary:
-      db_type: DECIMAL(19,4)      # explicit SQL type for DDL
-      check_expr: "salary >= 0"   # CHECK constraint
-      default_expr: "0.00"        # DEFAULT value
-      index: true                 # create a standalone index
-      description: "Monthly gross salary"  # COMMENT ON COLUMN (Postgres/Oracle)
-    status:
-      enum_values: [draft, active, archived, deleted]  # dialect-appropriate enum constraint
-    updated_at:
-      default_expr: "now()"       # DEFAULT now() -- auto-normalised per dialect
-      on_update_expr: "now()"     # MySQL: ON UPDATE; Postgres/MSSQL/Oracle: trigger
-    department_id:
-      foreign_key:                # FOREIGN KEY constraint
-        table: hr.departments
-        column: id
-        schema: hr                # optional -- schema of the referenced table
-      index: true
+  schema:
+    database:
+      columns:
+        employee_id:
+          primary_key: true           # part of the primary key + merge key for upsert
+          nullable: false             # NOT NULL
+          generated: true             # IDENTITY / SERIAL / AUTO_INCREMENT
+        email:
+          unique: true                # UNIQUE constraint
+          nullable: false
+        salary:
+          type: DECIMAL(19,4)         # explicit SQL type for DDL
+          check_expr: "salary >= 0"   # CHECK constraint
+          default_expr: "0.00"        # DEFAULT value
+          description: "Monthly gross salary"  # COMMENT ON COLUMN (Postgres/Oracle)
+        status:
+          enum_values: [draft, active, archived, deleted]  # dialect-appropriate enum
+        updated_at:
+          default_expr: "now()"       # DEFAULT now() -- auto-normalised per dialect
+          on_update_expr: "now()"     # MySQL: ON UPDATE; Postgres/MSSQL/Oracle: trigger
+        department_id:
+          foreign_key:                # FOREIGN KEY constraint
+            table: hr.departments
+            column: id
+            schema: hr                # optional -- schema of the referenced table
+      indexes:
+        idx_employees_dept:
+          columns: [department_id]
 ```
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `db_type` | string | -- | Explicit SQL type for DDL generation (e.g. `DECIMAL(19,4)`, `VARCHAR(50)`). In the unified `schema.database.columns` block, use `type` instead. |
-| `primary_key` | bool | `false` | Include in PRIMARY KEY constraint |
+| `type` | string | -- | Explicit SQL type for DDL generation (e.g. `DECIMAL(19,4)`, `VARCHAR(50)`). Highest priority in the type resolver. |
+| `primary_key` | bool | `false` | Include in PRIMARY KEY constraint (and merge key for `upsert` / `insert_ignore` / `merge_delete`) |
 | `unique` | bool | `false` | UNIQUE constraint |
-| `index` | bool | `false` | Create a standalone index |
 | `nullable` | bool | `true` | Whether the column allows NULL |
 | `generated` | bool | `false` | Column is auto-generated (IDENTITY / SERIAL / AUTO_INCREMENT) |
 | `check_expr` | string | -- | SQL CHECK expression |
@@ -180,6 +171,8 @@ Per-column DDL hints for auto-created tables:
 | `description` | string | -- | Human-readable comment |
 | `enum_values` | list | -- | Allowed values. Postgres: `CREATE TYPE ... AS ENUM`; MySQL: inline `ENUM(...)`; MSSQL/Oracle/Databricks: `CHECK` constraint. |
 
+For standalone indexes, use `schema.database.indexes` (named, multi-column-capable). Per-column `index: true` shorthand is not supported in the unified block.
+
 > **Note:** All five drivers (Postgres, MSSQL, Oracle, MySQL, Databricks) now use
 > the shared `generate_ddl_with_schema()` function from `potato-etl-common` for
 > DDL generation. This means PRIMARY KEY, UNIQUE, FOREIGN KEY, CHECK, DEFAULT,
@@ -188,30 +181,25 @@ Per-column DDL hints for auto-created tables:
 > because Delta Lake uses `USING DELTA` syntax and has different constraint
 > semantics.
 
-## Value mapping
+## Renaming and value injection
 
-Map target column names to value sources at the sink boundary -- a lightweight alternative to adding a separate `rename` or `map` step. The field is called `values` (previously `columns`; the old name is **not** accepted as an alias — you must update your config).
+The legacy top-level `values:` field has been removed. Three primitives now cover what it did:
 
-```yaml
-  values:
-    LOAD_DATETIME: $inserted_at     # batch col or env var → new column LOAD_DATETIME
-    CREATED_AT: $load_ts            # env var load_ts (e.g. now()) → new column CREATED_AT
-    SYSTEM_PRESENCE: null            # explicit NULL (database receives NULL, not DEFAULT)
-    ORDER_ID: $id                    # batch col 'id' → renamed to ORDER_ID
-```
+| Goal | Where to put it | Example |
+|---|---|---|
+| Rename a column | `schema.database.columns.<src>.rename_to: <target>` (key = source name, case-insensitive) | `divisionId: { rename_to: DIVISION_ID }` |
+| Drop a column | `schema.database.columns.<src>.drop: true` | `legacy_col: { drop: true }` |
+| Inject a column from an env var | `schema.arrow.columns.<col>.value: $name` | `inserted_at: { value: $load_ts, type: "timestamp[us, UTC]" }` |
+| Inject a column from another batch column | `schema.arrow.columns.<col>.value: $source.col` | `event_ts: { value: $source.created_at }` |
+| Inject a literal | `schema.arrow.columns.<col>.value: <scalar>` | `source_system: { value: 'genesys' }` |
+| Inject a NULL column | `schema.arrow.columns.<col>.value: null` | `archived_at: { value: null, type: "timestamp[us]" }` |
+| Inject the result of an expression | `schema.arrow.columns.<col>.value: <expr>` | `body: { value: truncate($source.raw_body, 4000) }` |
 
-- `$name` is resolved in order: (1) batch column named `name` → data used, field renamed to target; (2) pipeline `environment:` variable named `name` → value broadcast to all rows as new column; (3) neither → error.
-- `null` injects an explicit SQL NULL into every row. Because the column IS included in the INSERT, the database stores NULL — it does **not** trigger DEFAULT expressions. Exception: MSSQL with `mode: odbc` (no KEEPNULLS) replaces NULL with the column's DEFAULT.
-- To let the database fill a DEFAULT, **omit** the column from `values:` entirely and don't include it in the batch — the alignment layer will skip it.
-- Columns not listed are passed through unchanged
-
-### Injecting columns from environment variables
-
-The `values:` mapping can reference pipeline-level variables from the `environment:` block. This is useful for injecting audit columns like `inserted_at` without a separate `map` step:
+> **Top-level `values:` is rejected at load.** Pipelines that still carry it get a parse-time error with a migration hint pointing here. There is no migration shim.
 
 ```yaml
 environment:
-  load_ts: now()                    # evaluated once at pipeline start
+  load_ts: now()                       # evaluated once at pipeline start
 
 steps:
   - id: source
@@ -227,18 +215,119 @@ steps:
       connection: target_db
       table: orders_archive
     create_table: if_not_exists
-    values:
-      inserted_at: $load_ts         # inject pipeline timestamp
-      updated_at: $load_ts          # initial value; server refreshes via trigger
     schema:
+      arrow:
+        columns:
+          inserted_at:
+            value: $load_ts            # inject env var (broadcast to every row)
+            type: "timestamp[us, UTC]"
+          updated_at:
+            value: $load_ts            # initial value; server refreshes via trigger
+            type: "timestamp[us, UTC]"
+          source_system:
+            value: 'orders'            # literal string broadcast
       database:
         columns:
           inserted_at:
             type: TIMESTAMPTZ
           updated_at:
             type: TIMESTAMPTZ
-            default_expr: "now()"     # server fills on INSERT (when column omitted)
-            on_update_expr: "now()"   # server updates on UPDATE
+            default_expr: "now()"      # server fills on INSERT (when column omitted)
+            on_update_expr: "now()"    # server updates on UPDATE
+          legacy_temp:
+            drop: true                 # drop the column entirely
 ```
 
-> **Note:** `column_options` / `schema.database.columns` only affect columns that are **present in the batch**. If a column is listed but doesn't exist in the data stream, it is silently ignored and won't appear in the generated DDL. Always ensure the column is in the batch — either from the source, a `map` step, or the sink's `values:` mapping.
+The value string is parsed via the expression DSL ([`expression-reference.md`](./expression-reference.md)). Top-level dispatch:
+
+- `null` → NULL fill
+- `$name` (no dot) → env-var broadcast
+- `$step.col` or `$source.col` → batch column copy, case-insensitive
+- bare identifier / quoted string / number / bool → broadcast literal
+- anything with `(` → expression evaluation (function calls, arithmetic, casts)
+
+> **Note:** `schema.database.columns` only affects columns that are **present in the batch**. If a column is listed but doesn't exist in the data stream (and isn't created via `schema.arrow.columns.<col>.value:`), it is silently ignored and won't appear in the generated DDL.
+
+## Patterns
+
+### Adding a server-stamped metadata column (e.g. `LOAD_DATETIME`)
+
+The cleanest place to inject a column from an environment variable is `schema.arrow.columns.<col>.value:` — it puts the column in the batch *and* keeps it co-located with any Arrow type override. The DDL hint then takes effect because the column is now in the batch.
+
+```yaml
+environment:
+  load_ts: now()                          # evaluated once at pipeline start
+
+steps:
+  - id: sink
+    type: write_db
+    input: source
+    target: { connection: dwh, schema: stg, table: STG_ORDERS }
+    mode: truncate
+    schema:
+      arrow:
+        columns:
+          LOAD_DATETIME:
+            value: $load_ts               # → puts the col in the batch
+            type: "timestamp[us, UTC]"    # optional cast
+      database:
+        columns:
+          LOAD_DATETIME:
+            default_expr: "getdate()"     # server-side default for direct inserts
+```
+
+`schema.arrow.columns.X.value:` injects the column into the batch, and `schema.database.columns.X.default_expr:` keeps a server-side default for direct inserts that bypass the pipeline. Both lines refer to the same target column, which is fine; the runtime stamps the DDL hint and injects the value in one pass.
+
+### Multi-target fan-out (one source → many sinks)
+
+Source-stamped metadata flows through `rename` and `identifier_case` (see [rename](./rename.md) and [identifier_case](../universal-schema-options.md#identifier_case-identifiercase)), so you don't need to repeat it. The recipe:
+
+1. Stamp primary keys, type overrides, and constraints **once** on the source step.
+2. If a target needs a different word shape than the source (e.g. camelCase source → snake_case PG), do that in a single `rename` step. The targets that don't need it can consume `source` directly.
+3. Per-sink: `identifier_case` for casing only; no per-sink rename map; no per-sink PK declaration.
+
+```yaml
+steps:
+  - id: source
+    type: read_db
+    from: { connection: mysql_src, query: "select * from audits" }
+    schema:
+      arrow:
+        columns:
+          eventTime: { type: "timestamp[us]" }
+      database:
+        columns:
+          value_hash: { primary_key: true }    # stamped once
+
+  - id: renamed                                # only the targets that need snake_case use this
+    type: rename
+    input: source
+    columns: { divisionId: division_id, auditId: audit_id, eventTime: event_time }
+
+  - id: write_pg
+    type: write_db
+    input: renamed                             # snake_case naming for PG
+    target: { connection: pg, schema: public, table: audits }
+    mode: upsert
+    keys: [value_hash]                         # post-rename name
+
+  - id: write_ods
+    type: write_db
+    input: source                              # ODS reads source directly
+    target: { connection: ods, table: EXT_GENESYS_AUDITS }
+    mode: upsert
+    keys: [value_hash]                         # source col name
+    options: { identifier_case: upper }        # divisionId → DIVISIONID
+
+  - id: write_dwh
+    type: write_db
+    input: source                              # DWH reads source directly
+    target: { connection: dwh, schema: stg, table: STG_GEN_AUDITS }
+    mode: truncate
+    options: { odbc: true, identifier_case: upper }
+```
+
+- `identifier_case` is *case only*. If a target needs `SNAKE_CASE_UPPER` from a camelCase source, route it through `rename` *and* `identifier_case: upper`.
+- `keys:` references columns as they appear in the batch the sink consumes. PG (post-rename) uses `value_hash`; ODS/DWH (pre-rename source) use the source name verbatim.
+- Each sink still needs its own `keys:` for upsert mode; the PK flag on source covers DDL, but the merge predicate is declared per-sink.
+- For sinks that don't need DDL (existing tables, `create_table: never`) the `schema.database` block can be omitted entirely on that sink — the source-stamped metadata is irrelevant once the table already exists.

@@ -36,8 +36,7 @@ Reads data from a REST API endpoint with automatic pagination.
 | `timeout_secs` | no | `30` | Per-request timeout in seconds |
 | `allow_non_2xx` | no | `false` | If `true`, non-2xx responses return empty data instead of erroring |
 | `dedup_key` | no | -- | Field name for cross-page deduplication (see below) |
-| `schema` | no | -- | Unified schema block. `schema.arrow.columns` overrides inferred Arrow types after reading (preferred over flat `arrow_overrides`). |
-| `arrow_overrides` | no | `{}` | Legacy flat Arrow type overrides per column. Prefer `schema.arrow.columns`. |
+| `schema` | no | -- | Unified schema block. `schema.arrow.columns` overrides inferred Arrow types after reading. |
 | `normalize_columns` | no | `false` | Lowercase all column names after reading |
 | `exclude` | no | `[]` | List of column names to drop immediately after reading |
 

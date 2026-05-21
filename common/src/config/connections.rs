@@ -524,6 +524,10 @@ impl ConnParams {
                 init_sql: options.init_sql.clone(),
                 ..StepDriverOptions::default()
             },
+            Self::Oracle { options, .. } => StepDriverOptions {
+                oracle: Some(options.clone()),
+                ..StepDriverOptions::default()
+            },
             _ => StepDriverOptions::default(),
         }
     }

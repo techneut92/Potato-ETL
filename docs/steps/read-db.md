@@ -47,7 +47,7 @@ Reads rows from a database table in batches. The `cursor` column controls pagina
 | `batch_size` | no | global | Override the pipeline-level `batch_size` for this source only |
 | `normalize_columns` | no | auto | Lowercase all column names. Auto-enabled for Oracle, off for others. |
 | `exclude` | no | `[]` | List of column names to drop immediately after reading |
-| `schema` | no | -- | Unified schema block. On sources, `schema.arrow.columns` overrides Arrow types after reading (same effect as flat `arrow_overrides`). |
+| `schema` | no | -- | Unified schema block. `schema.arrow.columns` overrides Arrow types after reading; `schema.database.columns` stamps metadata (PK, etc.) that propagates downstream. |
 | `options` | no | -- | Per-step driver options (see [Step driver options](./driver-options.md)) |
 
 ## Custom query

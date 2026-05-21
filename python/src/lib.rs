@@ -385,7 +385,7 @@ impl PyETL {
     ///   normalize_columns : True  → lowercase all column names
     ///                       False → preserve original case
     ///                       None  → auto: True for oracle://, False for others
-    ///   arrow_overrides   : dict { col: "arrow_type_str" }
+    ///   arrow_type_overrides   : dict { col: "arrow_type_str" }
     ///                       Per-column Arrow type overrides applied immediately after reading.
     ///   batch_size        : override the global batch_size for this source only
     ///   exclude           : list of column names to drop immediately after reading
@@ -393,7 +393,7 @@ impl PyETL {
     ///                       Keys: mode (Databricks: "api"|"odbc"),
     ///                       prefetch_rows (Oracle), fetch_array_size (Oracle),
     ///                       identifier_case ("as_is"|"upper"|"lower")
-    #[pyo3(signature = (conn, *, table=None, schema=None, query=None, cursor=None, normalize_columns=None, arrow_overrides=None, batch_size=None, exclude=None, options=None))]
+    #[pyo3(signature = (conn, *, table=None, schema=None, query=None, cursor=None, normalize_columns=None, arrow_type_overrides=None, batch_size=None, exclude=None, options=None))]
     fn read_db(
         &mut self,
         conn:              &str,
@@ -402,7 +402,7 @@ impl PyETL {
         query:             Option<String>,
         cursor:            Option<String>,
         normalize_columns: Option<bool>,
-        arrow_overrides:   Option<HashMap<String, String>>,
+        arrow_type_overrides:   Option<HashMap<String, String>>,
         batch_size:        Option<usize>,
         exclude:           Option<Vec<String>>,
         options:           Option<HashMap<String, PyObject>>,
@@ -410,7 +410,7 @@ impl PyETL {
     ) -> PyResult<PyComponentRef> {
         let driver_opts = parse_step_driver_options(options, py)?;
         let id = self.dag.next_id("read_db");
-        let arrow_cfg = arrow_overrides.map(|ao| ArrowSchemaConfig {
+        let arrow_cfg = arrow_type_overrides.map(|ao| ArrowSchemaConfig {
             columns: ao.into_iter().map(|(k, v)| (k, ArrowColumnDef {
                 arrow_type: Some(v), nullable: None, logical_type: None, value: None,
             })).collect(),
@@ -511,7 +511,7 @@ impl PyETL {
         rate_limit_rps   = None,
         timeout_secs     = None,
         allow_non_2xx    = false,
-        arrow_overrides  = None,
+        arrow_type_overrides  = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn read_api(
@@ -538,7 +538,7 @@ impl PyETL {
         rate_limit_rps:   Option<f64>,
         timeout_secs:     Option<u64>,
         allow_non_2xx:    bool,
-        arrow_overrides:  Option<HashMap<String, String>>,
+        arrow_type_overrides:  Option<HashMap<String, String>>,
     ) -> PyResult<PyComponentRef> {
         // HTTP method
         let http_method = match method.to_uppercase().as_str() {
@@ -597,7 +597,7 @@ impl PyETL {
         };
 
         let id = self.dag.next_id("rest_api");
-        let arrow_cfg = arrow_overrides.map(|ao| ArrowSchemaConfig {
+        let arrow_cfg = arrow_type_overrides.map(|ao| ArrowSchemaConfig {
             columns: ao.into_iter().map(|(k, v)| (k, ArrowColumnDef {
                 arrow_type: Some(v), nullable: None, logical_type: None, value: None,
             })).collect(),
@@ -841,9 +841,9 @@ impl PyETL {
     ///                  "merge_delete" | "truncate"
     ///   create_table   : "never" (default) | "if_not_exists" | "replace"
     ///                    Creates the target table from the Arrow schema of the
-    ///                    first batch.  Use `column_options` (incl. `db_type`) to
+    ///                    first batch.  Use `database_columns` (incl. `db_type`) to
     ///                    control DDL output.
-    ///   column_options : dict { col: { "primary_key": bool, "unique": bool,
+    ///   database_columns : dict { col: { "primary_key": bool, "unique": bool,
     ///                    "index": bool, "nullable": bool, "db_type": "SQL_TYPE",
     ///                    "check_expr": "...", "default_expr": "...",
     ///                    "on_update_expr": "...", "description": "...",
@@ -853,7 +853,7 @@ impl PyETL {
     ///                    from etl.primary_key metadata — no separate upsert_key needed.
     ///   values          : dict { target_col: "$source_col" | "null" } — value injection
     ///                    (converted to ArrowColumnDef entries with `value:` set)
-    ///   arrow_overrides : dict { col: "arrow_type_str" } — per-column Arrow type casts
+    ///   arrow_type_overrides : dict { col: "arrow_type_str" } — per-column Arrow type casts
     ///   batch_size      : override the global batch_size for this sink only
     ///   options         : dict of driver-specific options (see StepDriverOptions)
     ///                     Keys: mode (MSSQL: "tiberius"|"bcp"|"odbc"),
@@ -862,8 +862,8 @@ impl PyETL {
     ///                     oci_batch_size (int),
     ///                     identifier_case ("as_is"|"upper"|"lower")
     #[pyo3(signature = (input, conn, *, table, schema=None, mode="append",
-                        create_table="never", column_options=None,
-                        values=None, arrow_overrides=None, batch_size=None, options=None))]
+                        create_table="never", database_columns=None,
+                        values=None, arrow_type_overrides=None, batch_size=None, options=None))]
     fn write_db(
         &mut self,
         input:           &PyComponentRef,
@@ -872,9 +872,9 @@ impl PyETL {
         schema:          Option<String>,
         mode:            &str,
         create_table:    &str,
-        column_options:  Option<HashMap<String, PyObject>>,
+        database_columns:  Option<HashMap<String, PyObject>>,
         values:          Option<HashMap<String, String>>,
-        arrow_overrides: Option<HashMap<String, String>>,
+        arrow_type_overrides: Option<HashMap<String, String>>,
         batch_size:      Option<usize>,
         options:         Option<HashMap<String, PyObject>>,
         py:              Python<'_>,
@@ -888,14 +888,14 @@ impl PyETL {
             other           => return Err(PyValueError::new_err(format!(
                 "Unknown write mode '{other}'. Valid: append, insert_ignore, upsert, \
                  merge_delete, truncate. The merge key comes from primary_key=True \
-                 in column_options — no upsert_key parameter needed."
+                 in database_columns — no upsert_key parameter needed."
             ))),
         };
         let ct = parse_create_table_mode(create_table)?;
-        let co = parse_py_column_options(column_options, py)?;
+        let co = parse_py_database_columns(database_columns, py)?;
         let driver_opts = parse_step_driver_options(options, py)?;
         let id = self.dag.next_id("write_db");
-        let comp_schema = build_component_schema(arrow_overrides, co, values);
+        let comp_schema = build_component_schema(arrow_type_overrides, co, values);
         self.dag.add_sink(id.clone(), &input.id, conn, WriteOptions {
             table, db_schema: schema, mode: sink_mode, create_table: ct,
             sink_schema: potato_etl_runtime::SinkSchemaConfig {
@@ -927,7 +927,7 @@ impl PyETL {
     ///                  in the database (is_current = true) but absent from ALL
     ///                  incoming batches are expired at flush time.  Use for
     ///                  full-snapshot ingestion.  Leave False for delta/cherry-pick.
-    ///   column_options : dict { col: { "primary_key": bool, "db_type": "SQL_TYPE", ... } }
+    ///   database_columns : dict { col: { "primary_key": bool, "db_type": "SQL_TYPE", ... } }
     ///                    Applied BEFORE writing.  Metadata is baked into DDL when
     ///                    create_table is set.  Use `db_type` for per-column SQL type
     ///                    overrides (replaces the old `type_override` parameter).
@@ -935,7 +935,7 @@ impl PyETL {
     ///                    Converted to ArrowColumnDef entries with `value:` set.
     ///                    Inject columns from other columns or NULL at the sink boundary
     ///                    before SCD2 processing.
-    ///   arrow_overrides : dict { col: "arrow_type_str" } — per-column Arrow type casts
+    ///   arrow_type_overrides : dict { col: "arrow_type_str" } — per-column Arrow type casts
     ///
     /// Full example with auto-create::
     ///
@@ -945,7 +945,7 @@ impl PyETL {
     ///       schema         = "hr",
     ///       key            = "employee_id",
     ///       create_table   = "if_not_exists",
-    ///       column_options = {
+    ///       database_columns = {
     ///           "employee_id": {"nullable": False, "db_type": "VARCHAR(50)",
     ///                           "description": "AFAS employee number"},
     ///           "salary":      {"db_type": "NUMERIC(10,2)", "check_expr": "salary >= 0"},
@@ -963,7 +963,7 @@ impl PyETL {
     ///                    identifier_case ("as_is"|"upper"|"lower")
     #[pyo3(signature = (input, conn, *, table, schema=None, key="id", track=None,
                         col_names=None, create_table="never", close_missing=false,
-                        column_options=None, values=None, arrow_overrides=None,
+                        database_columns=None, values=None, arrow_type_overrides=None,
                         batch_size=None, options=None))]
     fn scd2_sink(
         &mut self,
@@ -976,9 +976,9 @@ impl PyETL {
         col_names:       Option<std::collections::HashMap<String, String>>,
         create_table:    &str,
         close_missing:   bool,
-        column_options:  Option<HashMap<String, PyObject>>,
+        database_columns:  Option<HashMap<String, PyObject>>,
         values:          Option<HashMap<String, String>>,
-        arrow_overrides: Option<HashMap<String, String>>,
+        arrow_type_overrides: Option<HashMap<String, String>>,
         batch_size:      Option<usize>,
         options:         Option<HashMap<String, PyObject>>,
         py:              Python<'_>,
@@ -1000,10 +1000,10 @@ impl PyETL {
             }
         }
         let ct = parse_create_table_mode(create_table)?;
-        let co = parse_py_column_options(column_options, py)?;
+        let co = parse_py_database_columns(database_columns, py)?;
         let driver_opts = parse_step_driver_options(options, py)?;
         let id = self.dag.next_id("scd2_sink");
-        let comp_schema = build_component_schema(arrow_overrides, co, values);
+        let comp_schema = build_component_schema(arrow_type_overrides, co, values);
         let sink_schema = potato_etl_runtime::config::SinkSchemaConfig {
             schema: comp_schema,
         };
@@ -1395,25 +1395,25 @@ fn parse_create_table_mode(s: &str) -> PyResult<potato_etl_runtime::CreateTableM
     }
 }
 
-/// Parse a Python `column_options` dict (col → attribute-dict) into a
-/// `ColumnOptionsMap`.
+/// Parse a Python `database_columns` dict (col → attribute-dict) into a
+/// `DatabaseColumnsMap`.
 ///
 /// Accepted keys per column: `primary_key`, `unique`, `index`, `nullable`,
 /// `db_type`, `check_expr`, `default_expr`, `on_update_expr`, `description`,
 /// `foreign_key`.
-fn parse_py_column_options(
+fn parse_py_database_columns(
     raw: Option<HashMap<String, PyObject>>,
     py:  Python<'_>,
-) -> PyResult<potato_etl_runtime::ColumnOptionsMap> {
+) -> PyResult<potato_etl_runtime::DatabaseColumnsMap> {
     use pyo3::types::PyDict;
     use potato_etl_runtime::ColumnOption;
 
-    let Some(raw) = raw else { return Ok(potato_etl_runtime::ColumnOptionsMap::new()); };
-    let mut out = potato_etl_runtime::ColumnOptionsMap::with_capacity(raw.len());
+    let Some(raw) = raw else { return Ok(potato_etl_runtime::DatabaseColumnsMap::new()); };
+    let mut out = potato_etl_runtime::DatabaseColumnsMap::with_capacity(raw.len());
 
     for (col, obj) in raw {
         let d = obj.bind(py).cast::<PyDict>().map_err(|_| PyValueError::new_err(
-            format!("column_options['{col}']: expected a dict of column attributes")
+            format!("database_columns['{col}']: expected a dict of column attributes")
         ))?;
 
         let mut co = ColumnOption::default();
@@ -1430,14 +1430,14 @@ fn parse_py_column_options(
 
         if let Some(v) = d.get_item("foreign_key")? {
             let fk = v.cast::<PyDict>().map_err(|_| PyValueError::new_err(
-                format!("column_options['{col}']['foreign_key']: expected dict with 'table' and 'column'")
+                format!("database_columns['{col}']['foreign_key']: expected dict with 'table' and 'column'")
             ))?;
             co.foreign_key = Some(potato_etl_runtime::ForeignKey {
                 table:  fk.get_item("table")?.ok_or_else(|| PyValueError::new_err(
-                    format!("column_options['{col}']['foreign_key']: missing 'table'")
+                    format!("database_columns['{col}']['foreign_key']: missing 'table'")
                 ))?.extract::<String>()?,
                 column: fk.get_item("column")?.ok_or_else(|| PyValueError::new_err(
-                    format!("column_options['{col}']['foreign_key']: missing 'column'")
+                    format!("database_columns['{col}']['foreign_key']: missing 'column'")
                 ))?.extract::<String>()?,
                 schema: fk.get_item("schema")?.map(|v| v.extract::<String>()).transpose()?,
             });
@@ -1448,7 +1448,7 @@ fn parse_py_column_options(
     Ok(out)
 }
 
-/// Build a [`ComponentSchema`] from optional arrow_overrides, column_options,
+/// Build a [`ComponentSchema`] from optional arrow_type_overrides, database_columns,
 /// and value injection maps.
 ///
 /// Used by `write_db` and `scd2_sink` to convert legacy Python API parameters
@@ -1456,17 +1456,17 @@ fn parse_py_column_options(
 ///
 /// `values` entries (`{ target_col: "$source" | "null" }`) are converted into
 /// `ArrowColumnDef` entries with `value:` set, merged into the arrow schema
-/// alongside any `arrow_overrides`.
+/// alongside any `arrow_type_overrides`.
 fn build_component_schema(
-    arrow_overrides: Option<HashMap<String, String>>,
-    column_options:  potato_etl_runtime::ColumnOptionsMap,
+    arrow_type_overrides: Option<HashMap<String, String>>,
+    database_columns:  potato_etl_runtime::DatabaseColumnsMap,
     values:          Option<HashMap<String, String>>,
 ) -> ComponentSchema {
-    // Merge arrow_overrides and values into a single ArrowColumnDef map.
+    // Merge arrow_type_overrides and values into a single ArrowColumnDef map.
     let mut arrow_columns: HashMap<String, ArrowColumnDef> = HashMap::new();
 
     // 1. Arrow overrides (type casts only, no value injection).
-    if let Some(ao) = arrow_overrides {
+    if let Some(ao) = arrow_type_overrides {
         for (k, v) in ao {
             arrow_columns.insert(k, ArrowColumnDef {
                 arrow_type: Some(v), nullable: None, logical_type: None, value: None,
@@ -1503,10 +1503,10 @@ fn build_component_schema(
         Some(ArrowSchemaConfig { columns: arrow_columns })
     };
 
-    let database = if column_options.is_empty() {
+    let database = if database_columns.is_empty() {
         None
     } else {
-        let db_cols: indexmap::IndexMap<String, DatabaseColumnDef> = column_options.into_iter()
+        let db_cols: indexmap::IndexMap<String, DatabaseColumnDef> = database_columns.into_iter()
             .map(|(name, co)| (name, DatabaseColumnDef {
                 db_type:        co.db_type,
                 primary_key:    co.primary_key,
@@ -1519,6 +1519,8 @@ fn build_component_schema(
                 foreign_key:    co.foreign_key,
                 description:    co.description,
                 enum_values:    None,
+                rename_to:      co.rename_to,
+                drop:           co.drop,
             }))
             .collect();
         Some(DatabaseSchemaConfig {

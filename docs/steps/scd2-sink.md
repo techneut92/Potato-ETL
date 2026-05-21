@@ -41,9 +41,6 @@ Slowly-Changing Dimension Type 2 sink. Automatically maintains a change-history 
 | `create_table` | no | `never` | Auto-create the history table |
 | `batch_size` | no | global | Override the pipeline-level batch size for this step. Controls both the incoming batch sub-chunking *and* the SQL chunk size for `WHERE key IN (...)` queries in write and flush paths. |
 | `schema` | no | -- | Unified schema block with `schema.arrow.columns` and `schema.database.columns` / `indexes` / `constraints`. Same structure as `write_db`. |
-| `values` | no | `{}` | Column value mapping (batch col rename / env var injection / explicit NULL) applied before SCD2 processing. Same semantics as `write_db.values`. Formerly named `columns` (renamed in code; the old name is not accepted). |
-| `arrow_overrides` | no | `{}` | Legacy flat Arrow type overrides. Prefer `schema.arrow.columns`. |
-| `column_options` | no | `{}` | Legacy flat DDL hints. Prefer `schema.database.columns`. |
 | `scd2_columns` | no | defaults | Custom names for the system columns (see below) |
 | `options` | no | -- | Per-step driver options (see [Step driver options](./driver-options.md)) |
 

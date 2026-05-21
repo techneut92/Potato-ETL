@@ -214,6 +214,19 @@ impl AzureKeyVaultProvider {
                     errors.push(format!("ServicePrincipal: {e}"));
                 }
             }
+        } else {
+            // SPN credentials weren't assembled — tell the user *which* env
+            // vars were missing so they can fix the launch (common with
+            // container runtimes that don't forward host env by default).
+            let missing: Vec<&str> = [
+                ("AZURE_TENANT_ID",     std::env::var("AZURE_TENANT_ID").is_err()),
+                ("AZURE_CLIENT_ID",     std::env::var("AZURE_CLIENT_ID").is_err()),
+                ("AZURE_CLIENT_SECRET", std::env::var("AZURE_CLIENT_SECRET").is_err()),
+            ].iter().filter_map(|(n, m)| if *m { Some(*n) } else { None }).collect();
+            errors.push(format!(
+                "ServicePrincipal: skipped (missing env vars: {})",
+                if missing.is_empty() { "<none — config block also empty>".to_string() } else { missing.join(", ") },
+            ));
         }
 
         // ── 2. Managed Identity (IMDS) ──────────────────────────────────────

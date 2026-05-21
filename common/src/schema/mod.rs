@@ -3,7 +3,7 @@
 //! ## 1. Per-column DDL hints ([`field`])
 //!
 //! [`ColumnOption`] is the per-column DDL constraint descriptor for sinks.
-//! [`ColumnOptionsMap`] = `HashMap<String, ColumnOption>`.
+//! [`DatabaseColumnsMap`] = `HashMap<String, ColumnOption>`.
 //!
 //! [`ForeignKey`] describes a foreign-key reference used by [`ColumnOption`].
 //!
@@ -20,15 +20,15 @@
 //! ## 4. Arrow metadata constants ([`constants`])
 //!
 //! [`META_NULLABLE`], [`META_PRIMARY_KEY`], … — the `etl.*` keys written by
-//! [`apply_column_options`] and read back by [`generate_ddl`].
+//! [`apply_database_columns`] and read back by [`generate_ddl`].
 //!
 //! ## 5. Schema application ([`apply`])
 //!
 //! | Function | Purpose |
 //! |---|---|
-//! | [`apply_arrow_overrides`]  | Arrow type casting (source + sink) |
+//! | [`apply_arrow_type_overrides`]  | Arrow type casting (source + sink) |
 //! | [`apply_value_injections`] | Value injection from env vars / batch columns |
-//! | [`apply_column_options`]   | DDL constraints + db_type at sink |
+//! | [`apply_database_columns`]   | DDL constraints + db_type at sink |
 //! | [`apply_rename`]           | Column renaming |
 
 // ── Submodules ────────────────────────────────────────────────────────────────
@@ -52,15 +52,15 @@ pub use constants::{
     META_ON_UPDATE_EXPR, META_PRIMARY_KEY, META_SOURCE_DB, META_UNIQUE,
 };
 
-pub use field::{ColumnOption, ColumnOptionsMap, ForeignKey, LogicalType, logical_type_for_source};
+pub use field::{ColumnOption, DatabaseColumnsMap, ForeignKey, LogicalType, logical_type_for_source};
 
 pub use table::{ColumnDef, TableSchema};
 
 pub use apply::{
-    apply_arrow_overrides, apply_rename, apply_column_options,
-    apply_value_injections, apply_exclude_columns,
+    apply_arrow_type_overrides, apply_rename, apply_database_columns,
+    apply_database_structural, apply_value_injections, apply_exclude_columns,
     // compile-once plans
-    ArrowOverridesPlan, compile_arrow_overrides, apply_arrow_overrides_plan,
+    ArrowTypeOverridesPlan, compile_arrow_type_overrides, apply_arrow_type_overrides_plan,
     MetadataStampPlan,  compile_metadata_stamps,  apply_metadata_stamp_plan,
 };
 

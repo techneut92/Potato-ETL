@@ -20,8 +20,8 @@
 //!
 //! | Function | Return type | Notes |
 //! |---|---|---|
-//! | `now()` | `Timestamp[us, UTC]` | current UTC time, same for all rows in batch |
-//! | `now_naive()` | `Timestamp[us]` | current UTC time without timezone, same for all rows in batch |
+//! | `now()` | `Timestamp[us]` | current **local** wall-clock time, naive (no tz). Same value for all rows in batch. Mirrors Python's `datetime.now()`. |
+//! | `utcnow()` | `Timestamp[us, UTC]` | current UTC time, tz-aware. |
 //! | `run_ts()` | `Timestamp[us, UTC]` | pipeline start time — same across all batches |
 //! | `run_ts_naive()` | `Timestamp[us]` | pipeline start time without timezone — same across all batches |
 //! | `year(col)` | `Int32` | works on Date32, Timestamp, or `"YYYY-MM-DD"` strings |
@@ -34,6 +34,7 @@
 //! | `lower(col)` | `Utf8` | |
 //! | `trim(col)` | `Utf8` | strips ASCII whitespace |
 //! | `length(col)` | `Int32` | UTF-8 character count |
+//! | `truncate(col, n)` / `left(col, n)` | `Utf8` | first `n` characters (UTF-8 chars, not bytes); shorter strings pass through; `n` must be a non-negative integer literal |
 //! | `json_get(col, "key")` | `Utf8` | extract JSON field; supports `"a.b.c"` dot paths |
 //! | `json_get(col, "arr[0]")` | `Utf8` | extract JSON array element |
 //! | `json_length(col)` | `Int32` | length of JSON array |

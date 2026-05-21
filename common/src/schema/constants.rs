@@ -1,11 +1,11 @@
 //! Arrow field metadata key constants (`etl.*`).
 //!
-//! These string keys are written by [`apply_arrow_overrides`][super::apply_arrow_overrides],
-//! [`apply_column_options`][super::apply_column_options], and source connectors,
+//! These string keys are written by [`apply_arrow_type_overrides`][super::apply_arrow_type_overrides],
+//! [`apply_database_columns`][super::apply_database_columns], and source connectors,
 //! then read back by [`generate_ddl`][super::generate_ddl] and
 //! [`table_def_from_arrow`][super::table_def_from_arrow].
 //!
-//! ## ETL policy keys (written by `apply_column_options`)
+//! ## ETL policy keys (written by `apply_database_columns`)
 //!
 //! | Key                  | Value type        | Meaning                                |
 //! |----------------------|-------------------|----------------------------------------|

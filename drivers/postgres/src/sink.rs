@@ -382,6 +382,46 @@ impl PgWriteDB {
             }
         }
 
+        // Coerce integer source columns to Boolean when the target column is
+        // BOOL/BOOLEAN — MySQL `TINYINT(1)` flags surface as ints but Postgres
+        // rejects them in an INSERT against a BOOLEAN column. Arrow's cast
+        // turns 0→false, non-zero→true (matches pandas semantics).
+        let aligned = if let Some(types) = &self.target_sql_types {
+            use arrow::datatypes::{DataType, Field, Schema};
+            let schema = aligned.schema();
+            let mut new_fields: Vec<Field> = Vec::with_capacity(schema.fields().len());
+            let mut new_cols: Vec<arrow::array::ArrayRef> = Vec::with_capacity(schema.fields().len());
+            let mut any_cast = false;
+            for (idx, field) in schema.fields().iter().enumerate() {
+                let target = types.get(idx).map(|s| s.as_str()).unwrap_or("");
+                let src_dt = field.data_type();
+                let needs_bool = matches!(target, "bool" | "boolean")
+                    && matches!(
+                        src_dt,
+                        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
+                      | DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64,
+                    );
+                if needs_bool {
+                    let cast = arrow::compute::cast(aligned.column(idx).as_ref(), &DataType::Boolean)?;
+                    new_fields.push(Field::new(field.name(), DataType::Boolean, field.is_nullable())
+                        .with_metadata(field.metadata().clone()));
+                    new_cols.push(cast);
+                    any_cast = true;
+                } else {
+                    new_fields.push((**field).clone());
+                    new_cols.push(arrow::array::ArrayRef::clone(aligned.column(idx)));
+                }
+            }
+            if any_cast {
+                let new_schema = std::sync::Arc::new(Schema::new_with_metadata(new_fields, schema.metadata().clone()));
+                RecordBatch::try_new(new_schema, new_cols)?
+            } else {
+                aligned
+            }
+        } else {
+            aligned
+        };
+
         Ok(aligned)
     }
 
@@ -655,7 +695,7 @@ impl PgWriteDB {
                 let pk_cols = potato_etl_common::db::pk_columns(&schema);
                 anyhow::ensure!(!pk_cols.is_empty(),
                     "mode=insert_ignore requires at least one column marked \
-                     `primary_key: true` in column_options");
+                     `primary_key: true` in database_columns");
                 let conflict_cols = pk_cols.iter()
                     .map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(", ");
 
@@ -707,7 +747,7 @@ impl PgWriteDB {
                 let pk_cols = potato_etl_common::db::pk_columns(&schema);
                 anyhow::ensure!(!pk_cols.is_empty(),
                     "mode=upsert/merge_delete requires at least one column marked \
-                     `primary_key: true` in column_options");
+                     `primary_key: true` in database_columns");
                 let conflict_cols = pk_cols.iter()
                     .map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(", ");
                 let updates: Vec<String> = schema.fields().iter()

@@ -109,6 +109,24 @@ pub fn eval(expr: &Expr, batch: &RecordBatch) -> anyhow::Result<ArrayRef> {
                  Define it in the top-level `environment:` block of your pipeline config."
             )
         }
+
+        // ── Column ref by step.col (`$source.col`) ───────────────────────────
+        // Case-insensitive lookup against the current batch. `step` is informational
+        // (we only have one batch here); multi-step batch routing isn't wired
+        // through eval, so any step name resolves against the same batch.
+        Expr::ColumnRef { step: _, col } => {
+            let want = col.to_lowercase();
+            let idx = batch.schema().fields().iter()
+                .position(|f| f.name().to_lowercase() == want);
+            match idx {
+                Some(i) => Ok(batch.column(i).clone()),
+                None => anyhow::bail!(
+                    "$source.{col} not found in batch (available: {})",
+                    batch.schema().fields().iter().map(|f| f.name().as_str())
+                        .collect::<Vec<_>>().join(", ")
+                ),
+            }
+        }
     }
 }
 
@@ -131,16 +149,20 @@ fn eval_call(func: &str, args: &[Expr], batch: &RecordBatch, n: usize) -> anyhow
     match func {
         // ── Temporal ─────────────────────────────────────────────────────────
         "now" => {
+            // Local wall-clock time, naive (no timezone). Mirrors Python's
+            // `datetime.now()` so that pipelines writing into DATETIME/
+            // DATETIME2 columns produce the same value as legacy Python ETLs.
+            // For tz-aware UTC, use `utcnow()`.
             anyhow::ensure!(args.is_empty(), "now() takes no arguments");
+            let ts = chrono::Local::now().naive_local().and_utc().timestamp_micros();
+            let arr: TimestampMicrosecondArray = (0..n).map(|_| Some(ts)).collect();
+            Ok(Arc::new(arr) as ArrayRef)
+        }
+        "utcnow" => {
+            anyhow::ensure!(args.is_empty(), "utcnow() takes no arguments");
             let ts = Utc::now().timestamp_micros();
             let arr: TimestampMicrosecondArray = (0..n).map(|_| Some(ts)).collect();
             Ok(Arc::new(arr.with_timezone("UTC")) as ArrayRef)
-        }
-        "now_naive" => {
-            anyhow::ensure!(args.is_empty(), "now_naive() takes no arguments");
-            let ts = Utc::now().timestamp_micros();
-            let arr: TimestampMicrosecondArray = (0..n).map(|_| Some(ts)).collect();
-            Ok(Arc::new(arr) as ArrayRef)
         }
         "run_ts" => {
             anyhow::ensure!(args.is_empty(), "run_ts() takes no arguments");
@@ -210,6 +232,32 @@ fn eval_call(func: &str, args: &[Expr], batch: &RecordBatch, n: usize) -> anyhow
             let s = to_string_array(&a)?;
             let result: Int32Array = s.iter()
                 .map(|v| v.map(|x| x.chars().count() as i32))
+                .collect();
+            Ok(Arc::new(result))
+        }
+        // Truncate a string to at most `n` characters (UTF-8 char count, not bytes).
+        // `truncate(col, 4000)` keeps the first 4000 chars and drops the rest;
+        // shorter strings are passed through unchanged. NULLs stay NULL.
+        // Synonyms: `left(col, n)` matches SQL Server / MySQL `LEFT()`.
+        "truncate" | "left" => {
+            anyhow::ensure!(args.len() == 2, "{func}(col, n) takes 2 arguments");
+            let n_val = match &args[1] {
+                Expr::Int(v) if *v >= 0 => *v as usize,
+                Expr::Int(v) => anyhow::bail!("{func}() length must be non-negative, got {v}"),
+                other => anyhow::bail!(
+                    "{func}() length must be an integer literal, got {other:?}"
+                ),
+            };
+            let a = eval(&args[0], batch)?;
+            let s = to_string_array(&a)?;
+            let result: StringArray = s.iter()
+                .map(|v| v.map(|x| {
+                    if x.chars().count() <= n_val {
+                        x.to_string()
+                    } else {
+                        x.chars().take(n_val).collect::<String>()
+                    }
+                }))
                 .collect();
             Ok(Arc::new(result))
         }

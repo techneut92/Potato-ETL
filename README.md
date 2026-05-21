@@ -660,8 +660,8 @@ Null propagation follows **SQL three-valued logic** for `and` / `or`:
 
 | Function | Returns | Description |
 |---|---|---|
-| `now()` | `TimestampMicrosecond[UTC]` | Current UTC timestamp |
-| `now_naive()` | `TimestampMicrosecond` | Current UTC timestamp without timezone info |
+| `now()` | `TimestampMicrosecond` | Current **local** wall-clock time, naive (no tz). Mirrors Python's `datetime.now()`. |
+| `utcnow()` | `TimestampMicrosecond[UTC]` | Current UTC timestamp, tz-aware. |
 | `run_ts()` | `TimestampMicrosecond[UTC]` | Pipeline start time -- same across all batches in a run |
 | `run_ts_naive()` | `TimestampMicrosecond` | Pipeline start time without timezone info |
 | `year(col)` | `Int32` | Calendar year |

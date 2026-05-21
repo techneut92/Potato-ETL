@@ -14,7 +14,17 @@ pub async fn pg_pool_with_init_sql(
     max_connections: u32,
     init_sql:        &[String],
 ) -> anyhow::Result<sqlx::PgPool> {
-    use sqlx::postgres::PgPoolOptions;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use sqlx::ConnectOptions;
+    use tracing::log::LevelFilter;
+    use std::time::Duration;
+
+    // Silence sqlx's per-statement "slow statement" warnings — for any sizable
+    // batched INSERT they fire at WARN with the entire bind-placeholder list,
+    // which floods the log. Our driver layer emits its own per-batch stats.
+    let connect_opts: PgConnectOptions = conn_str.parse::<PgConnectOptions>()?
+        .log_slow_statements(LevelFilter::Off, Duration::from_secs(60))
+        .log_statements(LevelFilter::Off);
 
     let mut opts = PgPoolOptions::new().max_connections(max_connections);
 
@@ -40,7 +50,7 @@ pub async fn pg_pool_with_init_sql(
         });
     }
 
-    let pool = opts.connect(conn_str).await?;
+    let pool = opts.connect_with(connect_opts).await?;
     Ok(pool)
 }
 

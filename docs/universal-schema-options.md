@@ -2,6 +2,8 @@
 
 This document describes **all universal options** available across potato_etl components, with a focus on schema-related configuration.
 
+All schema configuration goes through the unified `schema:` block (with `schema.arrow.columns` and `schema.database.columns` sub-blocks). See [Schema Block (Unified Schema Configuration)](#schema-block-unified-schema-configuration), [`steps/rename.md`](./steps/rename.md), and [`steps/write-db.md` § Patterns](./steps/write-db.md#patterns) for the canonical patterns.
+
 ---
 
 ## Table of Contents
@@ -49,41 +51,30 @@ These options are available on **all source steps** (`read_db`, `rest_api`, `rea
   from:
     connection: pg
     table: employees
-  
-  # -- Source Schema Options (universal) --------------------------------------
-  
-  arrow_overrides:
-    employee_id: utf8            # Arrow type cast: INT64 -> Utf8
-    salary: float64              # Arrow type cast: DECIMAL -> Float64
-  
+
+  # -- Arrow type casts + DDL metadata stamps (universal `schema:` block) ----
+
+  schema:
+    arrow:
+      columns:
+        employee_id: { type: utf8 }              # Arrow cast: INT64 → Utf8
+        salary:      { type: float64 }           # Arrow cast: DECIMAL → Float64
+    database:
+      columns:
+        employee_id: { primary_key: true }       # propagates through transforms
+
   normalize_columns: true      # Lowercase all column names (auto-detects for Oracle)
-  
+
   exclude:                     # Drop columns immediately after reading
     - large_blob_data
     - internal_field
-  
+
   batch_size: 5000             # Per-step override of global batch_size (reads only)
 ```
 
-### `arrow_overrides`
+### `schema.arrow.columns.<col>.type` (Arrow type override)
 
-**Type:** `HashMap<String, String>`  
-**Default:** `{}`
-
-Per-column Arrow type overrides. Maps column names to Arrow type strings. Uses `arrow::compute::cast()` internally.
-
-On **sources**, applied immediately after reading, before any transforms.  
-On **sinks**, applied at the sink boundary before value mapping and DDL generation.
-
-```yaml
-arrow_overrides:
-  employee_id: utf8           # INT64 -> Utf8
-  salary: float64             # DECIMAL -> Float64
-  col_date: date32            # force Date32 (days since epoch)
-  col_time: time64[us]        # force Time64 microseconds
-  col_timestamp: timestamp[us]      # force Timestamp microseconds, no timezone
-  col_timestamptz: timestamp[us, UTC]  # force Timestamp microseconds, UTC
-```
+Per-column Arrow type override. Maps column names to Arrow type strings. Uses `arrow::compute::cast()` internally. Applied immediately after reading on sources; at the sink boundary on sinks (before value injection, value mapping, and DDL generation).
 
 **Supported Arrow type strings:**
 - Integers: `int8`, `int16`, `int32`, `int64`, `uint8`, `uint16`, `uint32`, `uint64`
@@ -147,9 +138,7 @@ batch_size: 5000   # Fetch 5000 rows per query (overrides global batch_size)
 
 ## Sink-Side Schema Options (Universal for all Write Steps)
 
-These options are available on **all sink steps** (`write_db`, `scd2_sink`). They are applied **at the sink boundary**, right before writing.
-
-The preferred way to configure these is via the unified `schema:` block (see [Schema Block](#schema-block-unified-schema-configuration)). The legacy flat fields (`arrow_overrides`, `column_options`) are still accepted for backward compatibility.
+These options are available on **all sink steps** (`write_db`, `scd2_sink`). They are applied **at the sink boundary**, right before writing. All schema configuration goes through the unified `schema:` block (see [Schema Block](#schema-block-unified-schema-configuration)).
 
 ### Available on: `write_db`, `scd2_sink`
 
@@ -200,86 +189,10 @@ The preferred way to configure these is via the unified `schema:` block (see [Sc
         idx_orders_salary:
           columns: [salary]
   
-  # -- Value mapping (sibling of schema:) --------------------------------------
-  
-  values:
-    LOAD_DATETIME: $inserted_at    # batch col or env var → new column LOAD_DATETIME
-    SYSTEM_PRESENCE: null          # explicit NULL (database receives NULL, not DEFAULT)
-    ORDER_ID: $order_id            # batch col 'order_id' → renamed to ORDER_ID
-  
   batch_size: 20000                # Per-step write batch size (sink only)
 ```
 
-### `arrow_overrides` (Sink — legacy flat form)
-
-> **Prefer:** `schema.arrow.columns` in the unified schema block.
-
-**Type:** `HashMap<String, String>`  
-**Default:** `{}`
-
-Same as source-side `arrow_overrides`, but applied **at the sink boundary** before value mapping and metadata stamping. Useful for casting Arrow types right before writing (e.g., ensuring a timestamp has the correct precision/timezone).
-
-```yaml
-# Legacy flat form:
-arrow_overrides:
-  created_at: timestamp[us, UTC]
-  amount: decimal128(19, 4)
-
-# Preferred unified form:
-schema:
-  arrow:
-    columns:
-      created_at:
-        type: "timestamp[us, UTC]"
-      amount:
-        type: "decimal128(19, 4)"
-```
-
-### `values` (Value Mapping)
-
-**Type:** `HashMap<String, ColumnMapping>`  
-**Default:** `{}`
-
-Value mapping applied at the sink boundary. Allows renaming columns and injecting NULL values before writing. (Previously named `columns` -- renamed to `values` to support future expression syntax.)
-
-**Keys:** Target column names (as they will appear in the target table).  
-**Values:** Either:
-- `$name` -- Resolved in order: (1) batch column → rename to target; (2) pipeline `environment:` variable → broadcast value as new column.
-- `null` -- Inject an explicit SQL NULL column.
-
-```yaml
-values:
-  # Batch column or env var → target column
-  LOAD_DATETIME: $inserted_at      # batch col 'inserted_at' → LOAD_DATETIME, or env var
-  ORDER_ID: $order_id              # batch col 'order_id' → ORDER_ID
-  CUSTOMER_ID: $customer_id        # batch col 'customer_id' → CUSTOMER_ID
-  
-  # Explicit NULL injection
-  SYSTEM_PRESENCE: null            # database receives NULL (not DEFAULT)
-  UPDATED_AT: null                 # database receives NULL (not DEFAULT)
-```
-
-**NULL injection semantics:**
-- Columns mapped to `null` are **present in the DDL** (created by `create_table: if_not_exists`) and are **included in the INSERT** with explicit NULL values.
-- Because the column IS sent, the database stores NULL — it does **not** trigger DEFAULT expressions or IDENTITY generation.
-- **Exception:** MSSQL with `mode: odbc` (no KEEPNULLS) — SQL Server replaces NULL with the column's DEFAULT value. This is the one case where `null` mapping does trigger defaults.
-- **To let the database fill a DEFAULT:** omit the column from `values:` entirely and don't include it in the batch. The alignment layer will skip it, and the database fills the DEFAULT.
-- **Use case for `null`:** Columns where you explicitly want NULL (e.g., optional fields not yet populated, columns that should be NULL until a later pipeline fills them).
-
-**Important:** Columns not listed in `values:` are passed through unchanged.
-
-### `column_options` (legacy flat form)
-
-> **Prefer:** `schema.database.columns` in the unified schema block.
-
-**Type:** `HashMap<String, ColumnOption>`  
-**Default:** `{}`
-
-Per-column DDL hints applied at the sink boundary. Controls primary keys, unique constraints, indexes, foreign keys, CHECK constraints, DEFAULT expressions, SQL type overrides (`db_type`), and more.
-
-When using the legacy flat form, use `db_type` for SQL type overrides (replaces the removed standalone `type_override` map). In the unified `schema.database.columns` block, use `type` instead of `db_type`.
-
-See [Column Options (DDL Hints for Sinks)](#column-options-ddl-hints-for-sinks) for full details.
+> **The `values:` step field has been removed.** All value injection, renaming, and NULL injection now live inside the unified `schema:` block (see [`schema.arrow.columns.<col>.value`](#schemaarrowcolumnscol-fields) for injection and [`schema.database.columns.<src>.rename_to`](#schemadatabasecolumns-fields) for renames). The loader hard-errors with a migration hint if it encounters a step that still uses `values:`.
 
 ### `batch_size` (Write Override)
 
@@ -403,6 +316,16 @@ Controls how identifiers are emitted in DDL (`CREATE TABLE`) and DML (`INSERT IN
 | `upper` | Transform all identifiers to UPPERCASE | **Oracle** -- matches internal storage, avoids quoted identifiers. |
 | `lower` | Transform all identifiers to lowercase | Postgres convention. |
 
+> **Case only — not word shape.** `identifier_case` runs `to_uppercase()` / `to_lowercase()` on each identifier. It does **not** convert between word shapes:
+>
+> | Input | `upper` output | What it is *not* |
+> |---|---|---|
+> | `divisionId` | `DIVISIONID` | not `DIVISION_ID` |
+> | `division_id` | `DIVISION_ID` | (already snake_case) |
+> | `OrderTotal` | `ORDERTOTAL` | not `ORDER_TOTAL` |
+>
+> If your source is camelCase and the target wants `SNAKE_CASE_UPPER`, do the camel→snake conversion in a [`rename`](./steps/rename.md) step first, then let `identifier_case: upper` handle the casing. Metadata (PKs, types) is preserved through both transforms.
+
 **Oracle case sensitivity:**
 - Unquoted identifiers are **implicitly uppercased** by Oracle: `CREATE TABLE employees (...)` -> stored as `EMPLOYEES` in `ALL_TABLES`.
 - Quoted identifiers preserve case but require quotes everywhere: `CREATE TABLE "Employees" (...)` -> must use `"Employees"` in all queries.
@@ -429,7 +352,7 @@ The `schema:` block is the preferred way to configure all schema-related options
 
 ### Available on: `read_db`, `rest_api`, `write_db`, `scd2_sink`
 
-> On **sources** (`read_db`, `rest_api`), only `schema.arrow` is typically used — it overrides Arrow types after reading (same effect as flat `arrow_overrides`). `schema.database` is informational on sources and auto-filled from the DB catalog.
+> On **sources** (`read_db`, `rest_api`), `schema.arrow.columns` casts Arrow types after reading, and `schema.database.columns` stamps metadata (PKs, type overrides, descriptions) that propagates through downstream transforms (see [`rename`](./steps/rename.md) and [`identifier_case`](#identifier_case-identifiercase)) all the way to sinks.
 >
 > On **sinks** (`write_db`, `scd2_sink`), both `schema.arrow` and `schema.database` are used — `schema.arrow` casts data before writing, and `schema.database` drives DDL generation (column types, indexes, constraints).
 
@@ -486,13 +409,7 @@ The `schema:` block is the preferred way to configure all schema-related options
       constraints:
         chk_salary:
           check: "salary >= 0"
-  
-  # Value mapping is a sibling of schema:, not nested inside it
-  values:
-    LOAD_DATETIME: $inserted_at    # batch col or env var → new column LOAD_DATETIME
-    SYSTEM_PRESENCE: null          # explicit NULL (database receives NULL, not DEFAULT)
-    ORDER_ID: $order_id            # batch col 'order_id' → renamed to ORDER_ID
-  
+
   batch_size: 20000                # Per-step write batch size (sink only)
 ```
 
@@ -511,10 +428,10 @@ The `schema` block has two sub-blocks:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `type` | `string` | Arrow type string for casting (e.g. `"timestamp[us, UTC]"`, `"float64"`, `"utf8"`). Same syntax as flat `arrow_overrides`. |
+| `type` | `string` | Arrow type string for casting (e.g. `"timestamp[us, UTC]"`, `"float64"`, `"utf8"`). See the supported type strings in [`schema.arrow.columns.<col>.type`](#schemaarrowcolumnscoltype-arrow-type-override). |
 | `nullable` | `bool` | Arrow-level nullable override for this column. |
 | `logical_type` | `string` | Semantic / logical type annotation (e.g. `"json"`, `"uuid"`, `"currency"`). Stored as `etl.logical_type` in Arrow metadata and used by the 4-tier DDL type resolver to generate correct target types cross-database. |
-| `value` | `string` | Value injection: injects a column with data from an environment variable (`$var_name`) or copies from another batch column (`col_name`). If the column already exists, its data is replaced. Can be combined with `type` to cast after injection and `logical_type` for DDL hints. Works on both sources and sinks. |
+| `value` | `string` | Value injection. Replaces / appends a column from one of: env var (`$name`), batch column reference (`$source.col` or `$step.col`), literal scalar (bare ident, quoted string, int, float, or bool), or full expression (`truncate($source.body, 4000)`, `coalesce($source.a, $source.b)`, etc.). If the target column already exists in the batch, its data is replaced. Can be combined with `type` to cast after injection and `logical_type` for DDL hints. See [Value injection forms](#value-injection-forms) below. |
 
 ```yaml
 schema:
@@ -530,7 +447,25 @@ schema:
       inserted_at:                    # Value injection: add column from env var
         value: $load_ts               # references pipeline environment variable
         type: "timestamp[us, UTC]"
+      source_system:                  # Value injection: literal broadcast
+        value: 'genesys'              # YAML-quoted string → broadcast literal
+      truncated_body:                 # Value injection: expression
+        value: truncate($source.body, 4000)
 ```
+
+#### Value injection forms
+
+The string after `value:` is parsed with the expression DSL ([`steps/expression-reference.md`](./steps/expression-reference.md)). At the **top-level** of `value:`, the dispatch is:
+
+| Form | Meaning | Example |
+|---|---|---|
+| `null` (case-insensitive) | NULL-fill column | `value: null` |
+| `$name` (no dot) | env-var lookup, broadcast to every row | `value: $insert_at_var` |
+| `$step.col` / `$source.col` (dot form) | batch column reference (case-insensitive) | `value: $source.old_value` |
+| bare identifier / quoted string / number / bool | broadcast **literal scalar** | `value: 'genesys'`, `value: 42`, `value: true` |
+| anything with `(` (function call, binop, …) | evaluate against the batch | `value: truncate($source.body, 4000)`, `value: coalesce($source.a, $source.b)` |
+
+> **Bare identifier is a literal at this layer.** `value: foo` injects the string `"foo"`. To reference a batch column, use `$source.foo` (or `$step.foo`).
 
 #### `schema.database.columns` fields
 
@@ -547,12 +482,8 @@ schema:
 | `foreign_key` | `object` | -- | Foreign key reference: `table`, `column`, optional `schema`. |
 | `description` | `string` | -- | Human-readable column comment (`COMMENT ON COLUMN` for Postgres/Oracle). |
 | `enum_values` | `list` | -- | Allowed values for this column. Postgres: `CREATE TYPE ... AS ENUM`; MySQL: inline `ENUM(...)`; MSSQL/Oracle/Databricks: `CHECK` constraint. |
-
-> **`values` is a sibling, not nested.** The `values:` field (column mapping / NULL injection) is defined at the same level as `schema:`, not inside it.
-
-> **Legacy fields still work.** The flat `arrow_overrides`, `column_options`, and `values` fields are still accepted alongside the `schema:` block. When both are present, `schema.arrow.columns` takes precedence over flat `arrow_overrides`, and `schema.database.columns` takes precedence over flat `column_options`, for columns specified in both.
-
-> **Removed: `type_override`.** The standalone `type_override` map has been removed. Use `schema.database.columns.<col>.type` (or the legacy `column_options.<col>.db_type`) instead.
+| `rename_to` | `string` | -- | Rename this column to the given target name. Map key (source name) is matched case-insensitively; the target is written verbatim. Field metadata follows the rename. Replaces the removed top-level `values:` rename idiom. |
+| `drop` | `bool` | `false` | Drop this column from the batch. Replaces the source-level `exclude:` list when you want to drop inline with other DDL hints. |
 
 ---
 
@@ -574,12 +505,12 @@ mode: truncate        # TRUNCATE TABLE then INSERT (all batches in one transacti
 |------|--------------|-------------|
 | `append` | `INSERT INTO` -- errors on duplicate PK/unique constraint. | Default. Incremental loads where rows are guaranteed unique. |
 | `insert_ignore` | `INSERT ... ON CONFLICT DO NOTHING` (Postgres), `MERGE ... WHEN NOT MATCHED` (MSSQL/Oracle). Silently skips rows that already exist. | Idempotent loads -- re-running the pipeline is safe. |
-| `upsert` | `MERGE ... WHEN MATCHED THEN UPDATE WHEN NOT MATCHED THEN INSERT`. Updates existing rows + inserts new ones. Key columns derived from `column_options.primary_key: true`. | SCD Type 1 (overwrite). Incremental loads where rows may change. |
+| `upsert` | `MERGE ... WHEN MATCHED THEN UPDATE WHEN NOT MATCHED THEN INSERT`. Updates existing rows + inserts new ones. Key columns derived from `schema.database.columns.<col>.primary_key: true`. | SCD Type 1 (overwrite). Incremental loads where rows may change. |
 | `merge_delete` | `MERGE` + `DELETE FROM target WHERE key NOT IN (source)`. Turns the target into a **perfect mirror** of the incoming batch. | Full refresh. Mirror a source table. |
 | `truncate` | `TRUNCATE TABLE` then `INSERT`. All batches in one transaction. | Full reload every run. Fastest for replace-all scenarios. |
 
 **Key Resolution:**
-- `upsert`, `insert_ignore`, `merge_delete`: The MERGE key is **always** derived from the Arrow schema -- mark columns with `column_options.primary_key: true`.
+- `upsert`, `insert_ignore`, `merge_delete`: The MERGE key is **always** derived from the Arrow schema -- mark columns with `schema.database.columns.<col>.primary_key: true`.
 - There is **no separate `upsert_key` field**.
 
 **Example:**
@@ -590,10 +521,12 @@ mode: truncate        # TRUNCATE TABLE then INSERT (all batches in one transacti
     connection: mssql
     table: customers
   mode: upsert              # MERGE mode
-  column_options:
-    customer_id:            # This is the MERGE key
-      primary_key: true
-      nullable: false
+  schema:
+    database:
+      columns:
+        customer_id:        # This is the MERGE key
+          primary_key: true
+          nullable: false
 ```
 
 ---
@@ -618,8 +551,8 @@ create_table: replace        # DROP TABLE IF EXISTS + CREATE TABLE on first writ
 
 **DDL Generation:**
 - Column types are resolved via the **4-tier resolver** (see [Type Resolution Priority](#type-resolution-priority)).
-- Primary keys, unique constraints, indexes, foreign keys, CHECK constraints, DEFAULT expressions are all derived from `column_options`.
-- Nullability is derived from `column_options.nullable` (overrides Arrow `Field::is_nullable()`).
+- Primary keys, unique constraints, indexes, foreign keys, CHECK constraints, DEFAULT expressions are all derived from `schema.database.columns`.
+- Nullability is derived from `schema.database.columns.<col>.nullable` (overrides Arrow `Field::is_nullable()`).
 - Triggers for `on_update_expr` are created in the `post_create` phase (Postgres/MSSQL/Oracle).
 
 **Example:**
@@ -631,13 +564,15 @@ create_table: replace        # DROP TABLE IF EXISTS + CREATE TABLE on first writ
     table: employees
   create_table: if_not_exists   # Safe for production
   mode: upsert
-  column_options:
-    employee_id:
-      primary_key: true
-      nullable: false
-    email:
-      unique: true
-      nullable: false
+  schema:
+    database:
+      columns:
+        employee_id:
+          primary_key: true
+          nullable: false
+        email:
+          unique: true
+          nullable: false
 ```
 
 **Generated DDL (Postgres):**
@@ -675,7 +610,7 @@ All are **unambiguous once a `LogicalType` is attached**.
 
 ### Type Resolution Priority
 
-1. **`column_options.db_type`** (highest -- explicit per-column SQL type override).
+1. **`schema.database.columns.<col>.type`** (highest -- explicit per-column SQL type override).
 2. **`etl.logical_type`** Arrow metadata (semantic type like `json`, `uuid`, `currency`).
 3. **Source DB type** cross-dialect mapping.
 4. **Arrow `DataType`** fallback (lowest).
@@ -781,15 +716,20 @@ pipeline:
       table: raw_events
     batch_size: 5000                 # Per-step read batch size override
     
-    # -- Source Schema Options -------------------------------------------------
-    
-    arrow_overrides:
-      employee_id: utf8              # INT64 -> Utf8
-      created: timestamp[us, UTC]    # Cast to Timestamp microseconds UTC
-      updated: timestamp[us, UTC]    # Cast to Timestamp microseconds UTC
-    
+    # -- Source schema (Arrow type casts + PK stamps) --------------------------
+
+    schema:
+      arrow:
+        columns:
+          employee_id: { type: utf8 }                  # INT64 → Utf8
+          created:     { type: "timestamp[us, UTC]" }  # Cast to µs UTC
+          updated:     { type: "timestamp[us, UTC]" }
+      database:
+        columns:
+          event_id: { primary_key: true }              # propagates to the sink
+
     normalize_columns: true          # Lowercase all column names
-    
+
     exclude:                         # Drop these columns from the stream
       - internal_blob_data
       - temp_scratch_field
@@ -807,56 +747,57 @@ pipeline:
     create_table: if_not_exists      # Auto-create DDL on first run
     batch_size: 20000                # Per-step write batch size override
     
-    # -- Value mapping (sibling of schema:) ------------------------------------
-    
-    values:
-      # Batch column renames
-      EVENT_ID: $event_id            # batch col 'event_id' → renamed to EVENT_ID
-      USER_ID: $user_id              # batch col 'user_id' → renamed to USER_ID
-      
-      # Audit columns from environment variables
-      inserted_at: $load_ts          # env var load_ts (now()) → new column inserted_at
-      updated_at: $load_ts           # initial value; server refreshes via trigger on UPDATE
-    
     # -- Unified Schema Block --------------------------------------------------
-    
+
     schema:
+      arrow:
+        columns:
+          # Audit columns from environment variables — injected via value:
+          inserted_at:
+            value: $load_ts          # env var load_ts → broadcast as new column
+            type: "timestamp[us, UTC]"
+          updated_at:
+            value: $load_ts          # initial value; server refreshes via trigger on UPDATE
+            type: "timestamp[us, UTC]"
       database:
         columns:
+          # Column renames inline with DDL hints
           event_id:
+            rename_to: EVENT_ID      # source `event_id` → target `EVENT_ID`
             type: VARCHAR(50)        # Force VARCHAR(50) in DDL
             primary_key: true        # MERGE key
             nullable: false
-          
+
           user_id:
+            rename_to: USER_ID
             nullable: false
-          
+
           created:
             type: TIMESTAMPTZ        # Force TIMESTAMPTZ in DDL
-          
+
           updated:
             type: TIMESTAMPTZ
-          
+
           status:
             check_expr: "status IN ('pending', 'active', 'completed', 'failed')"
             default_expr: "'pending'"
-          
+
           inserted_at:
             type: TIMESTAMPTZ
             nullable: false
-          
+
           updated_at:
             type: TIMESTAMPTZ
             default_expr: "now()"    # fallback DEFAULT for INSERTs outside this pipeline
             on_update_expr: "now()"  # Postgres trigger refreshes on any UPDATE
             nullable: false
-        
+
         indexes:
           idx_events_user_id:
-            columns: [user_id]
-    
+            columns: [USER_ID]
+
     # -- Per-Step Driver Options ------------------------------------------------
-    
+
     options:
       identifier_case: lower         # Postgres convention: lowercase identifiers
 ```
@@ -891,13 +832,13 @@ FOR EACH ROW EXECUTE FUNCTION update_updated_at_events();
 
 **Data flow:**
 1. Read from Databricks `raw_events` (5000 rows/batch).
-2. Apply `arrow_overrides`: `employee_id` INT64 -> Utf8, `created`/`updated` cast to Timestamp(Microsecond, UTC).
-3. Lowercase all column names (`normalize_columns: true`).
-4. Drop `internal_blob_data`, `temp_scratch_field` (`exclude`).
-5. Sub-chunk to 20,000 rows/batch (`batch_size: 20000`).
-6. Apply `values` mapping: rename `event_id` → `EVENT_ID`, `user_id` → `USER_ID`. Inject `inserted_at` and `updated_at` from environment variable `load_ts` (pipeline start timestamp).
-7. Stamp `schema.database.columns` as Arrow metadata (including `type` → `etl.db_type`).
-8. Generate DDL on first run (`create_table: if_not_exists`), including named indexes from `schema.database.indexes`.
+2. Apply source-side `schema.arrow.columns`: `employee_id` INT64 → Utf8, `created`/`updated` cast to Timestamp(Microsecond, UTC).
+3. Stamp `event_id` as `primary_key: true` via source-side `schema.database.columns` (metadata propagates).
+4. Lowercase all column names (`normalize_columns: true`).
+5. Drop `internal_blob_data`, `temp_scratch_field` (`exclude`).
+6. Sub-chunk to 20,000 rows/batch (`batch_size: 20000`).
+7. Apply `schema.database.columns.<src>.rename_to` (`event_id` → `EVENT_ID`, `user_id` → `USER_ID`) and `schema.arrow.columns.<col>.value` (inject `inserted_at` and `updated_at` from environment variable `load_ts`).
+8. Generate DDL on first run (`create_table: if_not_exists`), including named indexes from `schema.database.indexes`. PK on `event_id` is inherited from the source stamp.
 9. MERGE into Postgres (`mode: upsert`, key = `event_id`).
 10. On future UPDATEs (inside or outside this pipeline), the Postgres trigger refreshes `updated_at` to `now()`.
 
@@ -908,9 +849,8 @@ FOR EACH ROW EXECUTE FUNCTION update_updated_at_events();
 | Option Category | Where | Applied When | Configures |
 |----------------|-------|--------------|-----------| 
 | **Global Config** | `config:` | Pipeline start | `batch_size`, `channel_capacity`, `log_level` |
-| **Source Schema** | `read_db`, `rest_api` | After reading | `arrow_overrides`, `normalize_columns`, `exclude`, `batch_size` (read) |
-| **Unified Schema** | `schema:` on sink | Before writing / DDL | `schema.arrow.columns` (Arrow casts), `schema.database.columns` (DDL), `schema.database.indexes`, `schema.database.constraints` |
-| **Value Mapping** | `values:` on sink | Before writing | Column renaming and NULL injection at the sink boundary |
+| **Source Schema** | `read_db`, `rest_api` | After reading | `schema.arrow.columns` (Arrow casts + value injection), `schema.database.columns` (PK / metadata stamps that propagate, `rename_to`, `drop`), `normalize_columns`, `exclude`, `batch_size` (read) |
+| **Sink Schema** | `schema:` on sink | Before writing / DDL | Same as source-side plus DDL generation from `schema.database.columns` / `indexes` / `constraints`. |
 | **Driver Options** | `options:` on step | Per-step override | MSSQL bcp/ODBC, Oracle direct-path, identifier case, prefetch, etc. |
 | **Write Mode** | `mode:` on sink | Before writing | How data is written: append, upsert, merge_delete, truncate, insert_ignore |
 | **Create Table** | `create_table:` on sink | First write | Whether to auto-generate DDL: never, if_not_exists, replace |
@@ -918,13 +858,12 @@ FOR EACH ROW EXECUTE FUNCTION update_updated_at_events();
 | **Logical Types** | Arrow metadata | DDL resolution | Semantic type (json, uuid, currency, ...) -- cross-database type mapping |
 
 **Key principles:**
-- **`schema:` block** is the preferred way to configure Arrow casts (`schema.arrow.columns`) and DDL hints (`schema.database.columns`, `indexes`, `constraints`).
+- **`schema:` block** is the canonical structure: Arrow casts and value injection under `schema.arrow.columns` (`.type`, `.value`, `.logical_type`), DDL hints / metadata stamps under `schema.database.columns` (including `.rename_to` and `.drop`), plus `schema.database.indexes` and `schema.database.constraints`.
 - **`from.schema` / `target.schema`** is the SQL namespace (e.g. `hr`, `dbo`), configured inside the `from:` or `target:` block.
-- **`values`** (formerly `columns`) handles column renaming and NULL injection at the sink boundary.
-- **`schema.database.columns.<col>.type`** replaces the removed standalone `type_override` map. In the legacy flat `column_options`, use `db_type` instead.
-- **Legacy flat fields** (`arrow_overrides`, `column_options`) are still accepted; `schema:` block takes precedence when both are set.
-- **Source-side options** (`arrow_overrides`, `normalize_columns`, `exclude`) are applied **immediately after reading**, before any transforms.
-- **Sink-side options** (`schema`, `values`, legacy `arrow_overrides`/`column_options`) are applied **at the sink boundary**, right before writing.
+- **The legacy `values:` step field has been removed.** All renaming + injection now lives inside `schema:`; the loader hard-errors on any pipeline that still uses `values:`.
+- **`schema.database.columns.<col>.type`** is the explicit SQL type override.
+- **Source-side options** (`schema`, `normalize_columns`, `exclude`) are applied **immediately after reading**, before any transforms.
+- **Sink-side options** (`schema`) are applied **at the sink boundary**, right before writing.
 - **Driver options** (`options:`) are **per-step overrides** of connection-level settings.
 - **No global schema state** -- all schema configuration is **per-step** and **explicit**.
-- **DDL is generated from Arrow schema** using the **4-tier type resolver** (`schema.database.columns.type` / `column_options.db_type` -> `etl.logical_type` -> source DB type -> Arrow type).
+- **DDL is generated from Arrow schema** using the **4-tier type resolver** (`schema.database.columns.<col>.type` → `etl.logical_type` → source DB type → Arrow type).

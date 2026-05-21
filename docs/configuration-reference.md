@@ -584,7 +584,7 @@ For detailed docs per step type, see [Pipeline Steps](./steps/index.md).
     database:
       columns:
         col:
-          type: "SQL_TYPE"         # replaces old type_override
+          type: "SQL_TYPE"         # explicit SQL type for DDL
           primary_key: true
           unique: false
           nullable: true
@@ -605,18 +605,11 @@ For detailed docs per step type, see [Pipeline Steps](./steps/index.md).
         chk_name:
           check: "col >= 0"
 
-  values:                          # column mapping (batch col or env var / null)
-    TARGET_COL: $source_col        # batch col → renamed, or env var → new column
-    INJECTED_COL: $env_var_name    # env var → broadcast value as new column
-    NULL_COL: null                 # explicit NULL (not DEFAULT — see write_db docs)
-
-  # -- Legacy flat fields (still supported, schema: block takes precedence) ----
-  # arrow_overrides:               # prefer schema.arrow.columns
-  #   col: arrow_type
-  # column_options:                # prefer schema.database.columns
-  #   col:
-  #     db_type: "SQL_TYPE"        # replaces removed type_override
-  #     primary_key: true
+  # Renames + injections live inside schema: now (top-level `values:` was removed):
+  #   schema.database.columns.<src>.rename_to    → column rename
+  #   schema.database.columns.<src>.drop: true   → column drop
+  #   schema.arrow.columns.<col>.value           → env var ($name), batch col ($source.col),
+  #                                                literal, or expression (e.g. truncate(...))
 
   options:                         # per-step driver options
     # MSSQL:
@@ -671,12 +664,6 @@ For detailed docs per step type, see [Pipeline Steps](./steps/index.md).
           type: "SQL_TYPE"
           primary_key: true
           nullable: false
-
-  # Legacy flat fields (still supported)
-  # column_options:
-  #   col:
-  #     db_type: "SQL_TYPE"
-  #     primary_key: true
 
   scd2_columns:                    # custom system column names
     valid_from: effective_from     # default: valid_from

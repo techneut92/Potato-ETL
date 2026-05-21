@@ -26,8 +26,8 @@ pub struct SourceSchemaConfig {
 
 impl SourceSchemaConfig {
     /// Returns the effective Arrow overrides map from `schema.arrow.columns`.
-    pub fn arrow_overrides(&self) -> HashMap<String, String> {
-        self.schema.arrow_overrides_map()
+    pub fn arrow_type_overrides(&self) -> HashMap<String, String> {
+        self.schema.arrow_type_overrides_map()
     }
 }
 
@@ -43,13 +43,13 @@ pub struct SinkSchemaConfig {
 
 impl SinkSchemaConfig {
     /// Returns the effective Arrow overrides map from `schema.arrow.columns`.
-    pub fn arrow_overrides(&self) -> HashMap<String, String> {
-        self.schema.arrow_overrides_map()
+    pub fn arrow_type_overrides(&self) -> HashMap<String, String> {
+        self.schema.arrow_type_overrides_map()
     }
 
     /// Returns the effective column options map from `schema.database.columns`.
-    pub fn column_options(&self) -> HashMap<String, ColumnOption> {
-        self.schema.column_options_map()
+    pub fn database_columns(&self) -> HashMap<String, ColumnOption> {
+        self.schema.database_columns_map()
     }
 
     /// Returns the `DatabaseSchemaConfig` if it contains named indexes or constraints.
@@ -88,7 +88,7 @@ impl ComponentSchema {
     }
 
     /// Extracts a flat `HashMap<String, String>` of pure type-cast overrides.
-    pub fn arrow_overrides_map(&self) -> HashMap<String, String> {
+    pub fn arrow_type_overrides_map(&self) -> HashMap<String, String> {
         match &self.arrow {
             Some(a) => a.columns.iter()
                 .filter(|(_, v)| v.arrow_type.is_some() && v.value.is_none())
@@ -110,9 +110,9 @@ impl ComponentSchema {
     }
 
     /// Extracts a flat `HashMap<String, ColumnOption>` for backward compat.
-    pub fn column_options_map(&self) -> HashMap<String, ColumnOption> {
+    pub fn database_columns_map(&self) -> HashMap<String, ColumnOption> {
         match &self.database {
-            Some(db) => db.to_column_options(),
+            Some(db) => db.to_database_columns(),
             None => HashMap::new(),
         }
     }
@@ -142,8 +142,8 @@ impl DatabaseSchemaConfig {
         self.columns.is_empty() && self.indexes.is_empty() && self.constraints.is_empty()
     }
 
-    /// Converts to the legacy `ColumnOptionsMap` format.
-    pub fn to_column_options(&self) -> HashMap<String, ColumnOption> {
+    /// Converts to the legacy `DatabaseColumnsMap` format.
+    pub fn to_database_columns(&self) -> HashMap<String, ColumnOption> {
         self.columns.iter().map(|(name, col)| {
             (name.clone(), ColumnOption {
                 db_type:        col.db_type.clone(),
@@ -157,6 +157,8 @@ impl DatabaseSchemaConfig {
                 foreign_key:    col.foreign_key.clone(),
                 description:    col.description.clone(),
                 enum_values:    col.enum_values.clone().unwrap_or_default(),
+                rename_to:      col.rename_to.clone(),
+                drop:           col.drop,
             })
         }).collect()
     }
@@ -222,6 +224,29 @@ pub struct DatabaseColumnDef {
     /// ```
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<String>>,
+
+    /// Rename this column to the given name when the batch flows through the
+    /// schema apply stage. Source-name match (the map key) is case-insensitive;
+    /// the target name is written verbatim. Field metadata (PK, default_expr,
+    /// description, …) follows the column through the rename.
+    ///
+    /// Replaces the step-level `values: { TARGET: $source }` rename idiom.
+    ///
+    /// ```yaml
+    /// database:
+    ///   columns:
+    ///     divisionId:
+    ///       rename_to: DIVISION_ID
+    ///       primary_key: true
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename_to: Option<String>,
+
+    /// Drop this column from the batch. Replaces the step-level `exclude:`
+    /// list for cases where you want to drop a column inline with its other
+    /// DDL hints. Source-name match is case-insensitive.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drop: bool,
 }
 
 // ── IndexDef ──────────────────────────────────────────────────────────────────
