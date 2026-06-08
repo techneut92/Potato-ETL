@@ -26,7 +26,7 @@ use oracle::sql_type::Timestamp as OracleTimestamp;
 use potato_etl_common::config::{DatabaseSchemaConfig, StepDriverOptions};
 use potato_etl_common::db::{TableMode, WriteStrategy};
 use potato_etl_common::db::common::SinkConfig;
-use potato_etl_common::db::common::alignment::{self as align, ColumnAlignment, MissingColumnBehavior};
+use potato_etl_common::db::common::alignment::{self as align, ColumnAlignment};
 use potato_etl_common::db::traits::SinkBuilder;
 use potato_etl_common::schema::ddl::{generate_ddl_with_schema, DdlOptions, SqlDialect};
 use potato_etl_common::schema::constants::META_LOGICAL_TYPE;
@@ -403,7 +403,7 @@ impl WriterState {
         } else {
             batch_schema.clone()
         };
-        let result = align::compute_alignment(&batch_schema_transformed, &target_cols, MissingColumnBehavior::Skip, &table_display)?;
+        let result = align::compute_alignment(&batch_schema_transformed, &target_cols, self.cfg.missing_column_behavior, &self.cfg.rename_targets(), &table_display)?;
         self.target_columns = Some(target_cols);
         self.alignment = Some(result);
         self.alignment_resolved = true;
@@ -602,6 +602,7 @@ impl SinkBuilder for OracleWriteDB {
         if let Some(p) = opts.parallel { self.parallel = Some(p); }
         if let Some(bs) = opts.oci_batch_size { self.oci_batch_size = bs; }
         if let Some(case) = opts.identifier_case { self.cfg.identifier_case = Some(case); }
+        if let Some(b) = opts.on_missing_column { self.cfg.missing_column_behavior = b; }
         // Top-level `options.staging_table` is the cross-driver flag;
         // `options.oracle.staging_table` is the legacy/nested variant.
         if let Some(s) = opts.staging_table { self.use_staging = s; }

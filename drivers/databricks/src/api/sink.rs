@@ -35,7 +35,7 @@ impl DatabricksApiSink {
     }
 
     async fn ensure_alignment(&mut self, batch_schema: &SchemaRef) -> anyhow::Result<()> {
-        use potato_etl_common::db::common::alignment::{self as align, MissingColumnBehavior};
+        use potato_etl_common::db::common::alignment::{self as align};
         if self.alignment.is_some() { return Ok(()); }
         if matches!(self.cfg.table_mode, TableMode::DropAndReplace) { return Ok(()); }
 
@@ -47,7 +47,7 @@ impl DatabricksApiSink {
         let ft = dbx_full_table(self.api.params.catalog.as_deref(), eff, &self.cfg.table);
         let tc = introspect_table_columns(&self.api, &ft).await?;
         let tc = match tc { Some(c) => c, None => return Ok(()) };
-        let result = align::compute_alignment(batch_schema, &tc, MissingColumnBehavior::Skip, &ft)?;
+        let result = align::compute_alignment(batch_schema, &tc, self.cfg.missing_column_behavior, &self.cfg.rename_targets(), &ft)?;
         self.target_columns = Some(tc);
         self.alignment = Some(result);
         Ok(())
@@ -210,6 +210,7 @@ impl SinkBuilder for DatabricksApiSink {
     fn merge_delete(mut self: Box<Self>) -> Box<dyn SinkBuilder> { self.cfg = self.cfg.merge_delete(); self }
     fn clear_and_insert(mut self: Box<Self>) -> Box<dyn SinkBuilder> { self.cfg = self.cfg.clear_and_insert(); self }
     fn with_driver_options(mut self: Box<Self>, opts: &StepDriverOptions) -> Box<dyn SinkBuilder> {
+        if let Some(b) = opts.on_missing_column { self.cfg.missing_column_behavior = b; }
         if !opts.init_sql.is_empty() {
             self.api.params.init_sql = opts.init_sql.clone();
         }

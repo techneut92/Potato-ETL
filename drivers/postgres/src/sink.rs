@@ -324,7 +324,7 @@ impl PgWriteDB {
     }
 
     async fn ensure_alignment(&mut self, batch_schema: &SchemaRef) -> anyhow::Result<()> {
-        use potato_etl_common::db::common::alignment::{self as align, MissingColumnBehavior};
+        use potato_etl_common::db::common::alignment::{self as align};
 
         if self.alignment.is_some() { return Ok(()); }
 
@@ -351,7 +351,8 @@ impl PgWriteDB {
         let result = align::compute_alignment(
             batch_schema,
             &target_cols,
-            MissingColumnBehavior::Skip,
+            self.cfg.missing_column_behavior,
+            &self.cfg.rename_targets(),
             &table_display,
         )?;
 
@@ -945,6 +946,7 @@ impl SinkBuilder for PgWriteDB {
     fn merge_delete(mut self: Box<Self>) -> Box<dyn SinkBuilder> { self.cfg = self.cfg.merge_delete(); self }
     fn clear_and_insert(mut self: Box<Self>) -> Box<dyn SinkBuilder> { self.cfg = self.cfg.clear_and_insert(); self }
     fn with_driver_options(mut self: Box<Self>, opts: &StepDriverOptions) -> Box<dyn SinkBuilder> {
+        if let Some(b) = opts.on_missing_column { self.cfg.missing_column_behavior = b; }
         // Extract Postgres-specific options from connection-level config.
         if let Some(ref pg) = opts.postgres {
             if let Some(mc) = pg.max_connections {

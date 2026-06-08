@@ -475,6 +475,12 @@ pub struct StepDriverOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identifier_case: Option<IdentifierCase>,
 
+    /// What to do when the target table has columns NOT present in the incoming
+    /// batch. `error` (default) fails the write; `skip` leaves those columns at
+    /// their DEFAULT/NULL. Applies to every database sink.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_missing_column: Option<crate::db::common::alignment::MissingColumnBehavior>,
+
     /// Databricks-specific REST API options.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub databricks: Option<DatabricksSourceOptions>,
@@ -520,6 +526,7 @@ impl StepDriverOptions {
             && self.parallel.is_none()
             && self.oci_batch_size.is_none()
             && self.identifier_case.is_none()
+            && self.on_missing_column.is_none()
             && self.databricks.is_none()
             && self.postgres.is_none()
             && self.mssql.is_none()
@@ -562,6 +569,7 @@ impl StepDriverOptions {
         merge_opt!(parallel);
         merge_opt!(oci_batch_size);
         merge_opt!(identifier_case);
+        merge_opt!(on_missing_column);
         merge_opt!(databricks);
 
         // Driver-specific sub-structs: field-level merge.

@@ -502,43 +502,79 @@ fn format_duration_us(us: i64) -> String {
 
 // ── SQL generators ────────────────────────────────────────────────────────────
 
+static RESERVED_WORDS: &[&str] = &[
+    "ABSOLUTE","ACTION","ADD","ALL","ALTER","AND","ANY","AS","ASC","AUTHORIZATION",
+    "BACKUP","BEGIN","BETWEEN","BREAK","BROWSE","BULK","BY","CASCADE","CASE","CHECK",
+    "CHECKPOINT","CLOSE","CLUSTERED","COALESCE","COLLATE","COLUMN","COMMIT","COMPUTE",
+    "CONSTRAINT","CONTAINS","CONTAINSTABLE","CONTINUE","CONVERT","CREATE","CROSS",
+    "CURRENT","CURRENT_DATE","CURRENT_TIME","CURRENT_TIMESTAMP","CURRENT_USER","CURSOR",
+    "DATABASE","DBCC","DEALLOCATE","DECLARE","DEFAULT","DELETE","DENY","DESC","DISK",
+    "DISTINCT","DISTRIBUTED","DOUBLE","DROP","DUMP","ELSE","END","ERRLVL","ESCAPE",
+    "EXCEPT","EXEC","EXECUTE","EXISTS","EXIT","EXTERNAL","FETCH","FILE","FILLFACTOR",
+    "FOR","FOREIGN","FREETEXT","FREETEXTTABLE","FROM","FULL","FUNCTION","GOTO","GRANT",
+    "GROUP","HAVING","HOLDLOCK","IDENTITY","IDENTITY_INSERT","IDENTITYCOL","IF","IN",
+    "INDEX","INNER","INSERT","INTERSECT","INTO","IS","JOIN","KEY","KILL","LEFT","LIKE",
+    "LINENO","LOAD","MERGE","NATIONAL","NOCHECK","NONCLUSTERED","NOT","NULL","NULLIF",
+    "OF","OFF","OFFSETS","ON","OPEN","OPENDATASOURCE","OPENQUERY","OPENROWSET","OPENXML",
+    "OPTION","OR","ORDER","OUTER","OVER","PERCENT","PIVOT","PLAN","PRECISION","PRIMARY",
+    "PRINT","PROC","PROCEDURE","PUBLIC","RAISERROR","READ","READTEXT","RECONFIGURE",
+    "REFERENCES","REPLICATION","RESTORE","RESTRICT","RETURN","REVERT","REVOKE","RIGHT",
+    "ROLLBACK","ROWCOUNT","ROWGUIDCOL","RULE","SAVE","SCHEMA","SECURITYAUDIT","SELECT",
+    "SEMANTICKEYPHRASETABLE","SEMANTICSIMILARITYDETAILSTABLE","SEMANTICSIMILARITYTABLE",
+    "SESSION_USER","SET","SETUSER","SHUTDOWN","SOME","STATISTICS","SYSTEM_USER","TABLE",
+    "TABLESAMPLE","TEXTSIZE","THEN","TO","TOP","TRAN","TRANSACTION","TRIGGER","TRUNCATE",
+    "TRY_CONVERT","TSEQUAL","UNION","UNIQUE","UNPIVOT","UPDATE","UPDATETEXT","USE","USER",
+    "VALUES","VARYING","VIEW","WAITFOR","WHEN","WHERE","WHILE","WITH","WITHIN GROUP",
+    "WRITETEXT",
+];
+
 /// True if any column name in `schema` is a T-SQL reserved word.
 ///
 /// tiberius's `bulk_insert(table)` sends an `INSERT BULK <table> (col type, …)`
-/// statement to the server unquoted, so columns named after reserved words
-/// (e.g. `KEY`, `USER`, `ORDER`) trigger a syntax error. When this returns
-/// `true` we route through `do_bulk_insert_partial`, which uses an explicit
-/// bracketed column list (`[KEY]`) and avoids the issue.
+/// statement to the server **unquoted**, so columns named after reserved words
+/// (e.g. `KEY`, `USER`, `ORDER`) trigger a syntax error and cannot be quoted via
+/// the surrounding SQL. The tiberius write path fails cleanly when this is true,
+/// directing the user to `mode: odbc` / `mode: bcp` (which quote identifiers).
 fn schema_has_reserved_column(schema: &SchemaRef) -> bool {
-    static RESERVED: &[&str] = &[
-        "ABSOLUTE","ACTION","ADD","ALL","ALTER","AND","ANY","AS","ASC","AUTHORIZATION",
-        "BACKUP","BEGIN","BETWEEN","BREAK","BROWSE","BULK","BY","CASCADE","CASE","CHECK",
-        "CHECKPOINT","CLOSE","CLUSTERED","COALESCE","COLLATE","COLUMN","COMMIT","COMPUTE",
-        "CONSTRAINT","CONTAINS","CONTAINSTABLE","CONTINUE","CONVERT","CREATE","CROSS",
-        "CURRENT","CURRENT_DATE","CURRENT_TIME","CURRENT_TIMESTAMP","CURRENT_USER","CURSOR",
-        "DATABASE","DBCC","DEALLOCATE","DECLARE","DEFAULT","DELETE","DENY","DESC","DISK",
-        "DISTINCT","DISTRIBUTED","DOUBLE","DROP","DUMP","ELSE","END","ERRLVL","ESCAPE",
-        "EXCEPT","EXEC","EXECUTE","EXISTS","EXIT","EXTERNAL","FETCH","FILE","FILLFACTOR",
-        "FOR","FOREIGN","FREETEXT","FREETEXTTABLE","FROM","FULL","FUNCTION","GOTO","GRANT",
-        "GROUP","HAVING","HOLDLOCK","IDENTITY","IDENTITY_INSERT","IDENTITYCOL","IF","IN",
-        "INDEX","INNER","INSERT","INTERSECT","INTO","IS","JOIN","KEY","KILL","LEFT","LIKE",
-        "LINENO","LOAD","MERGE","NATIONAL","NOCHECK","NONCLUSTERED","NOT","NULL","NULLIF",
-        "OF","OFF","OFFSETS","ON","OPEN","OPENDATASOURCE","OPENQUERY","OPENROWSET","OPENXML",
-        "OPTION","OR","ORDER","OUTER","OVER","PERCENT","PIVOT","PLAN","PRECISION","PRIMARY",
-        "PRINT","PROC","PROCEDURE","PUBLIC","RAISERROR","READ","READTEXT","RECONFIGURE",
-        "REFERENCES","REPLICATION","RESTORE","RESTRICT","RETURN","REVERT","REVOKE","RIGHT",
-        "ROLLBACK","ROWCOUNT","ROWGUIDCOL","RULE","SAVE","SCHEMA","SECURITYAUDIT","SELECT",
-        "SEMANTICKEYPHRASETABLE","SEMANTICSIMILARITYDETAILSTABLE","SEMANTICSIMILARITYTABLE",
-        "SESSION_USER","SET","SETUSER","SHUTDOWN","SOME","STATISTICS","SYSTEM_USER","TABLE",
-        "TABLESAMPLE","TEXTSIZE","THEN","TO","TOP","TRAN","TRANSACTION","TRIGGER","TRUNCATE",
-        "TRY_CONVERT","TSEQUAL","UNION","UNIQUE","UNPIVOT","UPDATE","UPDATETEXT","USE","USER",
-        "VALUES","VARYING","VIEW","WAITFOR","WHEN","WHERE","WHILE","WITH","WITHIN GROUP",
-        "WRITETEXT",
-    ];
     schema.fields().iter().any(|f| {
         let upper = f.name().to_ascii_uppercase();
-        RESERVED.iter().any(|kw| *kw == upper)
+        RESERVED_WORDS.iter().any(|kw| *kw == upper)
     })
+}
+
+/// The column names in `schema` that are T-SQL reserved words (for diagnostics).
+fn reserved_column_names(schema: &SchemaRef) -> Vec<String> {
+    schema.fields().iter()
+        .filter(|f| RESERVED_WORDS.iter().any(|kw| *kw == f.name().to_ascii_uppercase()))
+        .map(|f| f.name().clone())
+        .collect()
+}
+
+/// Rejects column names that the user wrapped in T-SQL brackets (e.g. a
+/// pipeline using `rename_to: "[KEY]"`).
+///
+/// Brackets are SQL *quoting syntax*, not part of the column name. If they leak
+/// into the actual column name they (a) become `[[KEY]]` when the driver quotes
+/// again, and (b) never match the real `KEY` column during alignment, silently
+/// nulling it. The driver quotes identifiers itself and handles reserved words
+/// like `KEY`, so a bare name is always correct — we fail fast with guidance.
+fn validate_no_bracketed_columns(schema: &SchemaRef) -> anyhow::Result<()> {
+    for f in schema.fields() {
+        let n = f.name();
+        if n.len() >= 2 && n.starts_with('[') && n.ends_with(']') {
+            tracing::warn!(
+                column = %n,
+                "MSSQL column names must not be bracketed — brackets are SQL quoting and are \
+                 added by the driver automatically; use a bare name (e.g. KEY, not [KEY])"
+            );
+            anyhow::bail!(
+                "MSSQL column '{n}' is bracketed. Remove the brackets from the column name \
+                 (e.g. `rename_to: KEY`, not `rename_to: \"[KEY]\"`) — the driver quotes \
+                 identifiers automatically and handles reserved words like KEY for you."
+            );
+        }
+    }
+    Ok(())
 }
 
 fn staging_sql_type(dt: &DataType) -> &'static str {
@@ -714,6 +750,9 @@ impl MssqlWriteDB {
         if let Some(case) = opts.identifier_case {
             self.cfg.identifier_case = Some(case);
         }
+        if let Some(b) = opts.on_missing_column {
+            self.cfg.missing_column_behavior = b;
+        }
         if let Some(ref mssql_opts) = opts.mssql {
             if let Some(st) = mssql_opts.staging_table {
                 self.staging_table_opt = Some(st);
@@ -854,10 +893,11 @@ impl MssqlWriteDB {
             let rows = std::mem::take(&mut self.row_buffer);
             let dest = if staging { "#etl_bulk_stage" } else { full_table.as_str() };
             let c = self.client.as_mut().unwrap();
-            let is_partial = !staging && (
-                self.alignment.as_ref().map(|a| !a.is_identity()).unwrap_or(false)
-                || self.saved_schema.as_ref().map(|s| schema_has_reserved_column(s)).unwrap_or(false)
-            );
+            // Partial path (temp table + INSERT … SELECT) is for non-identity
+            // alignment — column subset/reorder. Reserved-word columns are
+            // rejected earlier in `write_impl`, so they never reach here.
+            let is_partial = !staging
+                && self.alignment.as_ref().map(|a| !a.is_identity()).unwrap_or(false);
             let insert_result = if is_partial {
                 if let Some(ref schema) = self.saved_schema {
                     do_bulk_insert_partial(c, dest, schema, rows).await
@@ -940,7 +980,7 @@ impl MssqlWriteDB {
         did_create_table: bool,
     ) -> anyhow::Result<()> {
         use potato_etl_common::db::common::alignment::{
-            self as align, MissingColumnBehavior, TargetColumn,
+            self as align, TargetColumn,
         };
         if self.alignment.is_some() { return Ok(()); }
         if did_create_table { return Ok(()); }
@@ -963,7 +1003,7 @@ impl MssqlWriteDB {
         } else {
             batch_schema.clone()
         };
-        let result = align::compute_alignment(&batch_schema_transformed, &target_cols, MissingColumnBehavior::Skip, &table_display)?;
+        let result = align::compute_alignment(&batch_schema_transformed, &target_cols, self.cfg.missing_column_behavior, &self.cfg.rename_targets(), &table_display)?;
         self.alignment = Some(result);
         self.target_columns = Some(target_cols);
         Ok(())
@@ -1003,6 +1043,7 @@ impl MssqlWriteDB {
         let schema_name = self.cfg.schema_name.clone();
         let first       = self.first_batch;
         self.first_batch = false;
+        if first { validate_no_bracketed_columns(&schema)?; }
         let table_prepared      = self.cfg.table_prepared;
         self.cfg.table_prepared = true;
         let is_create_if_not_exists = matches!(self.cfg.table_mode, TableMode::CreateIfNotExists);
@@ -1109,6 +1150,20 @@ impl MssqlWriteDB {
         if first && self.mode == MssqlWriteMode::Tiberius && schema_has_date_before_time64(&schema) {
             anyhow::bail!(
                 "MSSQL tiberius path cannot handle DATE before TIME columns. Enable BCP or ODBC."
+            );
+        }
+
+        // ── tiberius reserved-word column guard ───────────────────────────
+        // tiberius' `INSERT BULK` writes the column list UNQUOTED, so a column
+        // named after a T-SQL reserved word (`KEY`, `USER`, `ORDER`, …) is a
+        // syntax error with no way to quote it. Fail cleanly instead of letting
+        // the server return a bare `Incorrect syntax near 'KEY'`.
+        if first && self.mode == MssqlWriteMode::Tiberius && schema_has_reserved_column(&schema) {
+            let reserved = reserved_column_names(&schema).join(", ");
+            anyhow::bail!(
+                "MSSQL tiberius mode cannot write column(s) named after T-SQL reserved words \
+                 ({reserved}) — its bulk-load protocol sends column names unquoted. Use \
+                 `options.mode: odbc` or `options.mode: bcp`, which quote identifiers."
             );
         }
 
@@ -1226,10 +1281,11 @@ impl MssqlWriteDB {
         if self.row_buffer.len() >= self.bulk_threshold {
             let rows   = std::mem::take(&mut self.row_buffer);
             let client = self.client.as_mut().unwrap();
-            let is_partial = !staging && (
-                self.alignment.as_ref().map(|a| !a.is_identity()).unwrap_or(false)
-                || self.saved_schema.as_ref().map(|s| schema_has_reserved_column(s)).unwrap_or(false)
-            );
+            // Partial path (temp table + INSERT … SELECT) is for non-identity
+            // alignment — column subset/reorder. Reserved-word columns are
+            // rejected earlier in `write_impl`, so they never reach here.
+            let is_partial = !staging
+                && self.alignment.as_ref().map(|a| !a.is_identity()).unwrap_or(false);
             if is_partial {
                 if let Some(ref schema) = self.saved_schema {
                     do_bulk_insert_partial(client, dest, schema, rows).await?;
@@ -1253,6 +1309,7 @@ impl MssqlWriteDB {
 
         let _num_rows = batch.num_rows();
         let schema   = batch.schema();
+        if first { validate_no_bracketed_columns(&schema)?; }
         let ddl_schema = self.cfg.ddl_schema.clone().unwrap_or_else(|| schema.clone());
         let full_table = format!("[{}].[{}]", self.cfg.schema_name, self.cfg.table);
         let table       = self.cfg.table.clone();
@@ -1349,7 +1406,7 @@ impl MssqlWriteDB {
                     }).await??;
                     if let Some(cols) = table_cols {
                         use potato_etl_common::db::common::alignment::{
-                            self as align, MissingColumnBehavior, TargetColumn,
+                            self as align, TargetColumn,
                         };
                         let target_cols: Vec<TargetColumn> = cols.into_iter()
                             .map(|c| TargetColumn {
@@ -1367,7 +1424,7 @@ impl MssqlWriteDB {
                         } else {
                             schema.clone()
                         };
-                        let result = align::compute_alignment(&batch_schema_transformed, &target_cols, MissingColumnBehavior::Skip, &table_display)?;
+                        let result = align::compute_alignment(&batch_schema_transformed, &target_cols, self.cfg.missing_column_behavior, &self.cfg.rename_targets(), &table_display)?;
                         self.alignment = Some(result);
                         self.target_columns = Some(target_cols);
                     }

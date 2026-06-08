@@ -20,6 +20,18 @@ options:
 > **Note:** The legacy `bcp: true` / `odbc: true` shorthand fields have been removed.
 > Use `mode: bcp` or `mode: odbc` instead.
 
+> **Column names must not be bracketed.** Never wrap an MSSQL column name in
+> T-SQL brackets in the pipeline — e.g. `rename_to: "[KEY]"`. Brackets are SQL
+> *quoting syntax*, not part of the name; the driver quotes identifiers itself
+> and handles reserved words like `KEY`, `USER`, `ORDER` automatically. A
+> bracketed name is rejected at write time (it would become `[[KEY]]` and would
+> never match the real column). Use the bare name: `rename_to: KEY`.
+>
+> Reserved-word columns work natively in `odbc` and `bcp` modes. The `tiberius`
+> mode currently **cannot** bulk-load a column whose name is a T-SQL reserved
+> word (tiberius emits the `INSERT BULK` column list unquoted); use `mode: odbc`
+> or `mode: bcp` for such tables.
+
 ## Oracle options
 
 ```yaml
@@ -43,12 +55,47 @@ options:
 
 ```yaml
 options:
-  identifier_case: upper   # transform SQL identifiers: as_is | upper | lower
+  identifier_case: upper       # transform SQL identifiers: as_is | upper | lower
+  on_missing_column: skip      # skip (default) | error
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `identifier_case` | `as_is` | Case transformation for table/column names in DDL and DML. `upper` is recommended for Oracle (matches its internal storage). `lower` is idiomatic for Postgres. |
+| `on_missing_column` | `skip` | What to do when the **target table** has a column that the incoming batch does **not** provide (matched by name, after `identifier_case` and any `rename_to`). `skip` (default) omits the column so the database supplies `NULL` / its `DEFAULT`. `error` is an opt-in strict mode that fails **only** when the missing column is `NOT NULL` with no default — i.e. the DB genuinely can't fill it. Applies to every database sink (Postgres, MSSQL, MySQL, Oracle, Databricks). |
+
+> **Why `skip` is the default:** the database is the authority on `NOT NULL`. A
+> `NOT NULL`, no-default column you omit is rejected by the DB anyway; a nullable
+> or defaulted column (e.g. an `inserted_at DEFAULT now()` audit column) is meant
+> to be filled by the server. Writing a subset of a table's columns is a normal,
+> supported pattern, so the engine doesn't second-guess it. Set
+> `on_missing_column: error` if you'd rather fail early with a clear message
+> than let the DB reject a required column mid-load.
+>
+> Extra batch columns **not** in the table are dropped (with a debug log) — with
+> one exception, below.
+
+### Discarded `rename_to` (always enforced)
+
+Independent of `on_missing_column`, a `rename_to` whose target matches **no**
+column in the table is **always an error** — that rename silently sent its data
+nowhere. This catches the common mistake of renaming to a name the table doesn't
+actually have:
+
+```yaml
+# table column is really `KEY`, so this discards the data → hard error
+key:
+  rename_to: ATTRIBUTE_KEY
+```
+```
+rename_to target 'ATTRIBUTE_KEY' matches no column in target table [stg.FOO] —
+the rename produced a column the table doesn't have, so its data would be
+silently discarded. Fix the target name to match an existing column, or remove
+the rename.
+```
+
+A `rename_to` for a source column that isn't selected is harmless dead config —
+it never reaches the batch, so it doesn't trigger this check.
 
 ## Databricks options
 

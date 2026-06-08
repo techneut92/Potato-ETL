@@ -46,14 +46,14 @@ impl MySqlWriteDB {
     }
 
     async fn ensure_alignment(&mut self, batch_schema: &SchemaRef) -> anyhow::Result<()> {
-        use potato_etl_common::db::common::alignment::{self as align, MissingColumnBehavior};
+        use potato_etl_common::db::common::alignment::{self as align};
         if self.alignment.is_some() { return Ok(()); }
         if matches!(self.cfg.table_mode, TableMode::DropAndReplace) { return Ok(()); }
         let pool = self.pool.as_ref().unwrap();
         let target_cols = crate::util::mysql_introspect_table_columns(pool, &self.cfg.schema_name, &self.cfg.table).await?;
         let target_cols = match target_cols { Some(c) => c, None => return Ok(()) };
         let table_display = mysql_full_table(&self.cfg.schema_name, &self.cfg.table);
-        let result = align::compute_alignment(batch_schema, &target_cols, MissingColumnBehavior::Skip, &table_display)?;
+        let result = align::compute_alignment(batch_schema, &target_cols, self.cfg.missing_column_behavior, &self.cfg.rename_targets(), &table_display)?;
         self.target_columns = Some(target_cols);
         self.alignment = Some(result);
         Ok(())
@@ -220,6 +220,7 @@ impl SinkBuilder for MySqlWriteDB {
     fn merge_delete(mut self: Box<Self>) -> Box<dyn SinkBuilder> { self.cfg = self.cfg.merge_delete(); self }
     fn clear_and_insert(mut self: Box<Self>) -> Box<dyn SinkBuilder> { self.cfg = self.cfg.clear_and_insert(); self }
     fn with_driver_options(mut self: Box<Self>, opts: &StepDriverOptions) -> Box<dyn SinkBuilder> {
+        if let Some(b) = opts.on_missing_column { self.cfg.missing_column_behavior = b; }
         if let Some(ref my) = opts.mysql {
             if !my.init_sql.is_empty() {
                 self.init_sql = my.init_sql.clone();

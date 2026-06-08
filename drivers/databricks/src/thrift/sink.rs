@@ -62,7 +62,7 @@ impl DatabricksThriftSink {
     }
 
     async fn ensure_alignment(&mut self, batch_schema: &SchemaRef) -> anyhow::Result<()> {
-        use potato_etl_common::db::common::alignment::{self as align, MissingColumnBehavior};
+        use potato_etl_common::db::common::alignment::{self as align};
         if self.alignment.is_some() { return Ok(()); }
         if matches!(self.cfg.table_mode, TableMode::DropAndReplace) { return Ok(()); }
 
@@ -76,7 +76,7 @@ impl DatabricksThriftSink {
         let client = self.client_mut();
         let tc = introspect_table_columns(client, &ft).await?;
         let tc = match tc { Some(c) => c, None => return Ok(()) };
-        let result = align::compute_alignment(batch_schema, &tc, MissingColumnBehavior::Skip, &ft)?;
+        let result = align::compute_alignment(batch_schema, &tc, self.cfg.missing_column_behavior, &self.cfg.rename_targets(), &ft)?;
         self.target_columns = Some(tc);
         self.alignment = Some(result);
         Ok(())
@@ -264,7 +264,10 @@ impl SinkBuilder for DatabricksThriftSink {
     fn upsert(mut self: Box<Self>) -> Box<dyn SinkBuilder> { self.cfg = self.cfg.upsert(); self }
     fn merge_delete(mut self: Box<Self>) -> Box<dyn SinkBuilder> { self.cfg = self.cfg.merge_delete(); self }
     fn clear_and_insert(mut self: Box<Self>) -> Box<dyn SinkBuilder> { self.cfg = self.cfg.clear_and_insert(); self }
-    fn with_driver_options(self: Box<Self>, _opts: &StepDriverOptions) -> Box<dyn SinkBuilder> { self }
+    fn with_driver_options(mut self: Box<Self>, opts: &StepDriverOptions) -> Box<dyn SinkBuilder> {
+        if let Some(b) = opts.on_missing_column { self.cfg.missing_column_behavior = b; }
+        self
+    }
     fn set_database_schema_config(&mut self, config: DatabaseSchemaConfig) { self.cfg.database_schema_config = Some(config); }
     fn set_ddl_schema(&mut self, schema: SchemaRef) { self.cfg.ddl_schema = Some(schema); }
 

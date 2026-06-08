@@ -61,6 +61,10 @@ pub struct SinkConfig {
     pub ddl_schema:     Option<SchemaRef>,
     /// Optional unified database schema config with named indexes and constraints.
     pub database_schema_config: Option<DatabaseSchemaConfig>,
+    /// What to do when the target table has columns absent from the incoming
+    /// batch. Defaults to [`MissingColumnBehavior::Error`]; set per step via
+    /// `options.on_missing_column: skip` to fall back to DEFAULT/NULL fill.
+    pub missing_column_behavior: alignment::MissingColumnBehavior,
 }
 
 impl SinkConfig {
@@ -75,6 +79,7 @@ impl SinkConfig {
             identifier_case: None,
             ddl_schema:     None,
             database_schema_config: None,
+            missing_column_behavior: alignment::MissingColumnBehavior::Skip,
         }
     }
 
@@ -86,6 +91,18 @@ impl SinkConfig {
     pub fn schema(mut self, s: impl Into<String>) -> Self {
         self.schema_name = s.into();
         self
+    }
+
+    /// The set of explicit `rename_to` targets from `schema.database.columns`.
+    ///
+    /// Used by alignment to detect a rename that points at a column the target
+    /// table doesn't have — a silent data-discard bug (e.g. `rename_to:
+    /// ATTRIBUTE_KEY` when the table column is `KEY`).
+    pub fn rename_targets(&self) -> Vec<String> {
+        self.database_schema_config
+            .as_ref()
+            .map(|c| c.columns.values().filter_map(|d| d.rename_to.clone()).collect())
+            .unwrap_or_default()
     }
 
     // ── DDL mode ──────────────────────────────────────────────────────────────
