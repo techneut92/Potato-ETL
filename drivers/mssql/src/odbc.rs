@@ -517,7 +517,7 @@ impl OdbcWriter {
         let col_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         let col_list = col_names
             .iter()
-            .map(|c| format!("[{c}]"))
+            .map(|c| bracket_ident(c))
             .collect::<Vec<_>>()
             .join(", ");
         let placeholders = col_names.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
@@ -1022,7 +1022,7 @@ pub(crate) fn odbc_staging_ddl(schema: &SchemaRef) -> String {
         .iter()
         .map(|f| {
             let sql_type = odbc_staging_sql_type(f.data_type());
-            format!("    [{}] {} NULL", f.name(), sql_type)
+            format!("    {} {} NULL", bracket_ident(f.name()), sql_type)
         })
         .collect();
     format!("CREATE TABLE #etl_odbc_stage (\n{}\n)", cols.join(",\n"))
@@ -1056,11 +1056,26 @@ fn odbc_staging_sql_type(dt: &DataType) -> &'static str {
     }
 }
 
+/// Wraps an identifier in T-SQL brackets — `[name]` — so reserved words like
+/// `KEY` are valid in generated SQL.
+///
+/// If the caller already supplied a bracketed name (e.g. a pipeline using
+/// `rename_to: "[KEY]"`), it is passed through unchanged so we never emit
+/// `[[KEY]]`, which SQL Server rejects with "Incorrect syntax".
+pub(crate) fn bracket_ident(name: &str) -> String {
+    let t = name.trim();
+    if t.len() >= 2 && t.starts_with('[') && t.ends_with(']') {
+        t.to_string()
+    } else {
+        format!("[{name}]")
+    }
+}
+
 /// `INSERT ... SELECT` from `#etl_odbc_stage` -> target.
 pub(crate) fn odbc_insert_select_sql(full_table: &str, col_names: &[String]) -> String {
     let cols = col_names
         .iter()
-        .map(|c| format!("[{c}]"))
+        .map(|c| bracket_ident(c))
         .collect::<Vec<_>>()
         .join(", ");
     format!(
@@ -1079,17 +1094,17 @@ pub(crate) fn odbc_merge_sql(
 ) -> String {
     let cols_sql = col_names
         .iter()
-        .map(|c| format!("[{c}]"))
+        .map(|c| bracket_ident(c))
         .collect::<Vec<_>>()
         .join(", ");
     let on_clause = pk_cols
         .iter()
-        .map(|k| format!("[T].[{k}] = [S].[{k}]"))
+        .map(|k| { let b = bracket_ident(k); format!("[T].{b} = [S].{b}") })
         .collect::<Vec<_>>()
         .join(" AND ");
     let insert_vals = col_names
         .iter()
-        .map(|c| format!("[S].[{c}]"))
+        .map(|c| format!("[S].{}", bracket_ident(c)))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -1099,7 +1114,7 @@ pub(crate) fn odbc_merge_sql(
         let update_set = col_names
             .iter()
             .filter(|c| !pk_cols.contains(c))
-            .map(|c| format!("[T].[{c}] = [S].[{c}]"))
+            .map(|c| { let b = bracket_ident(c); format!("[T].{b} = [S].{b}") })
             .collect::<Vec<_>>()
             .join(", ");
         format!(" WHEN MATCHED THEN UPDATE SET {update_set}")
@@ -1122,7 +1137,7 @@ pub(crate) fn odbc_merge_sql(
 pub(crate) fn odbc_staging_pk_index_sql(pk_cols: &[String]) -> String {
     let cols = pk_cols
         .iter()
-        .map(|c| format!("[{c}] ASC"))
+        .map(|c| format!("{} ASC", bracket_ident(c)))
         .collect::<Vec<_>>()
         .join(", ");
     format!("CREATE CLUSTERED INDEX [IX_etl_odbc_pk] ON #etl_odbc_stage ({cols})")
