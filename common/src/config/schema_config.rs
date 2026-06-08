@@ -52,14 +52,15 @@ impl SinkSchemaConfig {
         self.schema.database_columns_map()
     }
 
-    /// Returns the `DatabaseSchemaConfig` if it contains named indexes or constraints.
+    /// Returns the `DatabaseSchemaConfig` if it carries anything usable.
+    ///
+    /// Includes column defs (incl. `rename_to`/`drop`), named indexes, and
+    /// constraints. Previously gated on indexes/constraints only, so a step that
+    /// only renames columns never forwarded its config to the sink — silently
+    /// disabling the rename-target alignment guard.
     pub fn database_schema_config(&self) -> Option<&DatabaseSchemaConfig> {
         let db = self.schema.database.as_ref()?;
-        if db.indexes.is_empty() && db.constraints.is_empty() {
-            None
-        } else {
-            Some(db)
-        }
+        if db.is_empty() { None } else { Some(db) }
     }
 }
 

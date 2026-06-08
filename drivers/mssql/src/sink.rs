@@ -550,27 +550,30 @@ fn reserved_column_names(schema: &SchemaRef) -> Vec<String> {
         .collect()
 }
 
-/// Rejects column names that the user wrapped in T-SQL brackets (e.g. a
-/// pipeline using `rename_to: "[KEY]"`).
+/// Rejects column names the user wrapped in SQL quoting — T-SQL brackets
+/// (`[KEY]`) or double quotes (`"KEY"`) — e.g. a pipeline using
+/// `rename_to: "[KEY]"` or `rename_to: '"KEY"'`.
 ///
-/// Brackets are SQL *quoting syntax*, not part of the column name. If they leak
-/// into the actual column name they (a) become `[[KEY]]` when the driver quotes
-/// again, and (b) never match the real `KEY` column during alignment, silently
-/// nulling it. The driver quotes identifiers itself and handles reserved words
-/// like `KEY`, so a bare name is always correct — we fail fast with guidance.
-fn validate_no_bracketed_columns(schema: &SchemaRef) -> anyhow::Result<()> {
+/// Quoting is SQL *syntax*, not part of the column name. If it leaks into the
+/// actual name it (a) gets quoted again (`[[KEY]]`) and (b) never matches the
+/// real `KEY` column during alignment, silently nulling it. The driver quotes
+/// identifiers itself and handles reserved words, so a bare name is always
+/// correct — we fail fast with guidance.
+fn validate_no_quoted_columns(schema: &SchemaRef) -> anyhow::Result<()> {
     for f in schema.fields() {
         let n = f.name();
-        if n.len() >= 2 && n.starts_with('[') && n.ends_with(']') {
+        let bracketed = n.starts_with('[') && n.ends_with(']');
+        let dquoted   = n.starts_with('"') && n.ends_with('"');
+        if n.len() >= 2 && (bracketed || dquoted) {
             tracing::warn!(
                 column = %n,
-                "MSSQL column names must not be bracketed — brackets are SQL quoting and are \
-                 added by the driver automatically; use a bare name (e.g. KEY, not [KEY])"
+                "MSSQL column names must not be quoted — brackets/quotes are SQL syntax and are \
+                 added by the driver automatically; use a bare name (e.g. KEY, not [KEY] / \"KEY\")"
             );
             anyhow::bail!(
-                "MSSQL column '{n}' is bracketed. Remove the brackets from the column name \
-                 (e.g. `rename_to: KEY`, not `rename_to: \"[KEY]\"`) — the driver quotes \
-                 identifiers automatically and handles reserved words like KEY for you."
+                "MSSQL column '{n}' is quoted. Remove the brackets/quotes from the column name \
+                 (e.g. `rename_to: KEY`, not `[KEY]` or `\"KEY\"`) — the driver quotes identifiers \
+                 automatically and handles reserved words like KEY for you."
             );
         }
     }
@@ -1043,7 +1046,7 @@ impl MssqlWriteDB {
         let schema_name = self.cfg.schema_name.clone();
         let first       = self.first_batch;
         self.first_batch = false;
-        if first { validate_no_bracketed_columns(&schema)?; }
+        if first { validate_no_quoted_columns(&schema)?; }
         let table_prepared      = self.cfg.table_prepared;
         self.cfg.table_prepared = true;
         let is_create_if_not_exists = matches!(self.cfg.table_mode, TableMode::CreateIfNotExists);
@@ -1309,7 +1312,7 @@ impl MssqlWriteDB {
 
         let _num_rows = batch.num_rows();
         let schema   = batch.schema();
-        if first { validate_no_bracketed_columns(&schema)?; }
+        if first { validate_no_quoted_columns(&schema)?; }
         let ddl_schema = self.cfg.ddl_schema.clone().unwrap_or_else(|| schema.clone());
         let full_table = format!("[{}].[{}]", self.cfg.schema_name, self.cfg.table);
         let table       = self.cfg.table.clone();
