@@ -54,7 +54,10 @@ pub fn apply_map(
 
             match eval(&expr, &current) {
                 Ok(arr) => {
-                    current = replace_or_add_column(current, out_name, arr)?;
+                    // Nullable whenever the value comes from batch columns: a later
+                    // batch may hold NULLs where this one has none.
+                    let nullable = expr.references_columns() || arr.null_count() > 0;
+                    current = replace_or_add_column(current, out_name, arr, nullable)?;
                 }
                 Err(e) if e.to_string().contains("not found in batch") && pass == 1 => {
                     still_pending.push((out_name, expr_str));
@@ -91,15 +94,14 @@ pub fn apply_map(
 
 /// Replace or add a column in `batch`.
 fn replace_or_add_column(
-    batch: RecordBatch,
-    name:  &str,
-    arr:   ArrayRef,
+    batch:    RecordBatch,
+    name:     &str,
+    arr:      ArrayRef,
+    nullable: bool,
 ) -> anyhow::Result<RecordBatch> {
     let schema = batch.schema();
     let mut fields:  Vec<Field>  = schema.fields().iter().map(|f| (**f).clone()).collect();
     let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
-
-    let nullable = arr.null_count() > 0;
 
     if let Ok(idx) = schema.index_of(name) {
         let preserved_meta = fields[idx].metadata().clone();
@@ -202,5 +204,17 @@ mod tests {
         let disc = out.column_by_name("discount_revenue").unwrap()
             .as_any().downcast_ref::<Float64Array>().unwrap();
         assert!((disc.value(0) - 9.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn computed_columns_are_nullable_unless_constant() {
+        // sample_batch holds no NULLs; a later batch may.
+        let cols: IndexMap<String, String> = [
+            ("upper_tag".into(), "upper(tag)".into()),
+            ("constant".into(), "'x'".into()),
+        ].into_iter().collect();
+        let out = apply_map(sample_batch(), &cols, false).unwrap();
+        assert!(out.schema().field_with_name("upper_tag").unwrap().is_nullable());
+        assert!(!out.schema().field_with_name("constant").unwrap().is_nullable());
     }
 }

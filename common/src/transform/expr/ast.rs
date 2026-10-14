@@ -25,6 +25,21 @@ pub enum Expr {
     ColumnRef { step: String, col: String },
 }
 
+impl Expr {
+    /// Whether the value is computed from batch columns, so it can differ from one
+    /// batch to the next. Literals, env vars and functions of those cannot.
+    pub fn references_columns(&self) -> bool {
+        match self {
+            Expr::Column(_) | Expr::ColumnRef { .. } => true,
+            Expr::BinOp { left, right, .. } => left.references_columns() || right.references_columns(),
+            Expr::Unary { operand, .. } => operand.references_columns(),
+            Expr::Call { args, .. } => args.iter().any(Expr::references_columns),
+            Expr::Index { expr, index } => expr.references_columns() || index.references_columns(),
+            Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null | Expr::EnvVar(_) => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinOp { Add, Sub, Mul, Div, Eq, Ne, Lt, Le, Gt, Ge, And, Or }
 

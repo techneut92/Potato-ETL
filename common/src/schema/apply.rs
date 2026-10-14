@@ -594,7 +594,15 @@ pub fn apply_value_injections(
         };
 
         // ── Build field metadata ─────────────────────────────────────────────
-        let nullable = col_def.nullable.unwrap_or(resolved.null_count() > 0);
+        // The sink keeps the schema of the first batch, so nullability must not
+        // follow one batch's data: a value computed from batch columns is nullable,
+        // a constant (literal, env var, `now()`) is the same on every batch.
+        // At the top level a bare identifier is a literal, not a column.
+        let from_batch = match parse_expr(value_ref) {
+            Ok(Expr::Column(_)) | Err(_) => false,
+            Ok(expr) => expr.references_columns(),
+        };
+        let nullable = col_def.nullable.unwrap_or(from_batch || resolved.null_count() > 0);
         let mut meta = std::collections::HashMap::new();
         if let Some(lt) = &col_def.logical_type {
             meta.insert(META_LOGICAL_TYPE.to_string(), lt.clone());
@@ -911,5 +919,29 @@ mod tests {
         assert!(created_arr.is_null(0));
         assert!(created_arr.is_null(1));
         assert!(created_arr.is_null(2));
+    }
+
+    #[test]
+    fn test_value_injection_nullability_does_not_follow_one_batch() {
+        use crate::config::ArrowColumnDef;
+
+        // make_test_batch holds no NULLs, like a first batch after a filter;
+        // a later batch may hold them.
+        let nullable = |value: &str, explicit: Option<bool>| {
+            let mut injections = HashMap::new();
+            injections.insert("x".to_string(), ArrowColumnDef {
+                value: Some(value.to_string()),
+                nullable: explicit,
+                ..Default::default()
+            });
+            let out = apply_value_injections(make_test_batch(), &injections).unwrap();
+            out.schema().field_with_name("x").unwrap().is_nullable()
+        };
+        assert!(nullable("truncate($source.name, 3)", None), "expression over a column");
+        assert!(nullable("$source.name", None), "column reference");
+        assert!(!nullable("'genesys'", None), "quoted literal");
+        assert!(!nullable("genesys", None), "bare identifier is a literal");
+        assert!(!nullable("now()", None), "function without columns");
+        assert!(!nullable("truncate($source.name, 3)", Some(false)), "explicit setting wins");
     }
 }
