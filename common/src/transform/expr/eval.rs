@@ -7,6 +7,7 @@ use arrow::array::{
     StringArray, TimestampMicrosecondArray,
 };
 use arrow::compute::{cast, filter_record_batch};
+use arrow::datatypes::DataType;
 use arrow::compute::kernels::zip::zip as arrow_zip;
 use arrow::record_batch::RecordBatch;
 use chrono::Utc;
@@ -495,7 +496,23 @@ fn eval_binop(op: BinOp, l: ArrayRef, r: ArrayRef, n: usize) -> anyhow::Result<A
     }
 }
 
+/// Utf8, LargeUtf8, Utf8View, or a dictionary of one of those.
+fn is_string_type(t: &DataType) -> bool {
+    match t {
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => true,
+        DataType::Dictionary(_, value) => is_string_type(value),
+        _ => false,
+    }
+}
+
 fn eval_comparison(op: BinOp, l: &ArrayRef, r: &ArrayRef, _n: usize) -> anyhow::Result<ArrayRef> {
+    // Two strings compare as strings. The numeric attempt would "succeed" for them:
+    // arrow's string -> Float64 cast turns every non-number into NULL instead of
+    // failing, so `name == "x"` came out false on every row.
+    if is_string_type(l.data_type()) && is_string_type(r.data_type()) {
+        return compare_as_strings(op, l, r);
+    }
+
     let numeric = (|| -> anyhow::Result<ArrayRef> {
         let lf = to_float64(l)?;
         let rf = to_float64(r)?;
@@ -517,6 +534,10 @@ fn eval_comparison(op: BinOp, l: &ArrayRef, r: &ArrayRef, _n: usize) -> anyhow::
         return Ok(arr);
     }
 
+    compare_as_strings(op, l, r)
+}
+
+fn compare_as_strings(op: BinOp, l: &ArrayRef, r: &ArrayRef) -> anyhow::Result<ArrayRef> {
     let ls = to_string_array(l)?;
     let rs = to_string_array(r)?;
     let result: BooleanArray = ls.iter().zip(rs.iter())
@@ -531,4 +552,49 @@ fn eval_comparison(op: BinOp, l: &ArrayRef, r: &ArrayRef, _n: usize) -> anyhow::
         })
         .collect();
     Ok(Arc::new(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{Int64Array, StringViewArray};
+    use arrow::datatypes::{Field, Schema};
+
+    fn kept(col: ArrayRef, condition: &str) -> usize {
+        let schema = Arc::new(Schema::new(vec![Field::new("c", col.data_type().clone(), true)]));
+        let batch = RecordBatch::try_new(schema, vec![col]).unwrap();
+        apply_condition(batch, condition).unwrap().num_rows()
+    }
+
+    fn strings() -> Vec<Option<&'static str>> {
+        vec![Some("divisionId"), Some("divisionid"), Some("name"), None, Some("DIVISIONID")]
+    }
+
+    #[test]
+    fn string_comparisons_on_every_string_type() {
+        let utf8 = Arc::new(StringArray::from(strings())) as ArrayRef;
+        for col in [
+            utf8.clone(),
+            Arc::new(StringViewArray::from(strings())) as ArrayRef,
+            cast(&utf8, &DataType::LargeUtf8).unwrap(),
+            cast(&utf8, &DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))).unwrap(),
+        ] {
+            let ty = col.data_type().clone();
+            assert_eq!(kept(col.clone(), "c == \"divisionid\""), 1, "{ty}: ==");
+            assert_eq!(kept(col.clone(), "c == 'divisionid'"), 1, "{ty}: == with single quotes");
+            assert_eq!(kept(col.clone(), "lower(c) == \"divisionid\""), 3, "{ty}: lower() ==");
+            assert_eq!(kept(col.clone(), "c != \"name\""), 3, "{ty}: != (NULL never matches)");
+            assert_eq!(kept(col, "c < \"e\""), 3, "{ty}: < is lexicographic");
+        }
+    }
+
+    #[test]
+    fn numeric_comparisons_stay_numeric() {
+        let ints = Arc::new(Int64Array::from(vec![Some(1), Some(5), Some(10), None])) as ArrayRef;
+        assert_eq!(kept(ints.clone(), "c > 2"), 2);
+        assert_eq!(kept(ints, "c == 5"), 1);
+        // A string column against a number compares numerically: "10" > 9, not "10" < "9".
+        let numeric_strings = Arc::new(StringArray::from(vec!["1", "5", "10"])) as ArrayRef;
+        assert_eq!(kept(numeric_strings, "c > 9"), 1);
+    }
 }
