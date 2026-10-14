@@ -3,11 +3,11 @@
 All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Releases
-before 0.0.2-alpha.3 are only recorded as git tags.
+before 0.0.3 are only recorded as git tags.
 
 ## [Unreleased]
 
-## [0.0.2-alpha.3] - 2026-10-14
+## [0.0.3] - 2026-10-14
 
 ### Fixed
 
