@@ -7,6 +7,16 @@ before 0.0.3 are only recorded as git tags.
 
 ## [Unreleased]
 
+## [0.0.5] - 2026-10-14
+
+### Added
+
+- Expression functions `regexp_like(col, pattern)` (aliases `regex_like`, `rlike`) and
+  `regexp_replace(col, pattern, replacement)` (alias `regex_replace`), with Rust regex syntax.
+  NULL stays NULL; `regexp_replace` leaves values that do not match unchanged, so it can
+  replace phone numbers in a column while keeping other text. Pattern and replacement must
+  be string literals.
+
 ## [0.0.4] - 2026-10-14
 
 ### Fixed

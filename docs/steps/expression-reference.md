@@ -95,6 +95,8 @@ Drop the `, UTC` part for a naive (timezone-unaware) timestamp: `cast(col, "time
 | `lower(col)` | `lcase` | Utf8 | Lowercase |
 | `trim(col)` | -- | Utf8 | Strip leading/trailing whitespace |
 | `length(col)` | `len`, `char_length` | Int32 | UTF-8 character count |
+| `regexp_like(col, pattern)` | `regex_like`, `rlike` | Boolean | True when `pattern` matches anywhere in `col`; anchor with `^`/`$` for a full match. NULL stays NULL. `pattern` must be a string literal ([Rust regex syntax](https://docs.rs/regex/latest/regex/#syntax)). |
+| `regexp_replace(col, pattern, replacement)` | `regex_replace` | Utf8 | Replaces every match of `pattern` with `replacement` (`$1` or `${1}` and `${name}` refer to groups; use the braces when letters or digits follow, since `$1x` names a group `1x`). Values that do not match pass through unchanged; NULL stays NULL. Both arguments must be string literals. A backslash in a DSL string escapes the next character, so write `\\d` for `\d`, or use classes such as `[0-9]` and `[+]`. Example: `regexp_replace(ani, '^(tel:)?[+]?[0-9][0-9 ()-]{5,}$', 'redacted')` replaces phone numbers and keeps other text. |
 | `truncate(col, n)` | `left` | Utf8 | First `n` UTF-8 characters of `col` (shorter strings pass through, NULLs stay NULL). `n` must be a non-negative integer literal. Useful for fitting fixed-width target columns (e.g. truncate to 4000 for an Oracle `VARCHAR2(4000)` or MSSQL `NVARCHAR(4000)`). |
 | `concat(a, b, ...)` | -- | Utf8 | Concatenate values (any number of arguments) |
 

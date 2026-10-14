@@ -43,6 +43,7 @@ base64            = { workspace = true }
 uuid              = { workspace = true }
 dashmap           = { workspace = true }
 jsonwebtoken      = { workspace = true }
+regex             = { workspace = true }
 
 # Parquet support (optional, enabled by default)
 parquet           = { workspace = true, optional = true }

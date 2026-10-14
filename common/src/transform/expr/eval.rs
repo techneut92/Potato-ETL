@@ -209,6 +209,27 @@ fn eval_call(func: &str, args: &[Expr], batch: &RecordBatch, n: usize) -> anyhow
                 .collect();
             Ok(Arc::new(result))
         }
+        "regexp_like" | "regex_like" | "rlike" => {
+            anyhow::ensure!(args.len() == 2, "regexp_like(str, pattern) takes 2 arguments");
+            let s = to_string_array(&eval(&args[0], batch)?)?;
+            let re = literal_regex(&args[1], "regexp_like")?;
+            let result: BooleanArray = s.iter()
+                .map(|v| v.map(|x| re.is_match(x)))
+                .collect();
+            Ok(Arc::new(result))
+        }
+        "regexp_replace" | "regex_replace" => {
+            anyhow::ensure!(args.len() == 3, "regexp_replace(str, pattern, replacement) takes 3 arguments");
+            let s = to_string_array(&eval(&args[0], batch)?)?;
+            let re = literal_regex(&args[1], "regexp_replace")?;
+            let Expr::Str(replacement) = &args[2] else {
+                anyhow::bail!("regexp_replace(): the replacement must be a string literal");
+            };
+            let result: StringArray = s.iter()
+                .map(|v| v.map(|x| re.replace_all(x, replacement.as_str()).into_owned()))
+                .collect();
+            Ok(Arc::new(result))
+        }
         "lower" | "lcase" => {
             anyhow::ensure!(args.len() == 1, "lower() takes 1 argument");
             let a = eval(&args[0], batch)?;
@@ -496,6 +517,14 @@ fn eval_binop(op: BinOp, l: ArrayRef, r: ArrayRef, n: usize) -> anyhow::Result<A
     }
 }
 
+/// Compile a regex pattern given as a string literal (compiled once per batch).
+fn literal_regex(arg: &Expr, func: &str) -> anyhow::Result<regex::Regex> {
+    let Expr::Str(pattern) = arg else {
+        anyhow::bail!("{func}(): the pattern must be a string literal");
+    };
+    regex::Regex::new(pattern).map_err(|e| anyhow::anyhow!("{func}(): invalid pattern {pattern:?}: {e}"))
+}
+
 /// Utf8, LargeUtf8, Utf8View, or a dictionary of one of those.
 fn is_string_type(t: &DataType) -> bool {
     match t {
@@ -596,5 +625,62 @@ mod tests {
         // A string column against a number compares numerically: "10" > 9, not "10" < "9".
         let numeric_strings = Arc::new(StringArray::from(vec!["1", "5", "10"])) as ArrayRef;
         assert_eq!(kept(numeric_strings, "c > 9"), 1);
+    }
+
+    fn texts(col: &[Option<&str>], expr: &str) -> Vec<Option<String>> {
+        let arr = Arc::new(StringArray::from(col.to_vec())) as ArrayRef;
+        let schema = Arc::new(Schema::new(vec![Field::new("c", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+        let out = eval(&parse(expr).unwrap(), &batch).unwrap();
+        to_string_array(&out).unwrap().iter().map(|v| v.map(str::to_string)).collect()
+    }
+
+    // Shapes seen in Genesys ANI/DNIS columns.
+    const CALLERS: [Option<&str>; 7] = [
+        Some("tel:+31612345678"), Some("tel:+3220123456"), Some("tel:anonymous"), Some("tel:*99"),
+        Some("sip:4a1b+tp01.example.com@localhost"), None, Some("+31 20 123 4567"),
+    ];
+    const PHONE: &str = "'^(tel:)?[+]?[0-9][0-9 ()-]{5,}$'";
+
+    #[test]
+    fn regexp_replace_redacts_phone_numbers_only() {
+        let out = texts(&CALLERS, &format!("regexp_replace(c, {PHONE}, '<Redacted - IT Dev>')"));
+        let r = Some("<Redacted - IT Dev>".to_string());
+        assert_eq!(out, vec![
+            r.clone(), r.clone(), Some("tel:anonymous".into()), Some("tel:*99".into()),
+            Some("sip:4a1b+tp01.example.com@localhost".into()), None, r,
+        ]);
+    }
+
+    #[test]
+    fn regexp_replace_groups_and_backslash_escapes() {
+        // `\\d` in the DSL is the regex `\d`; `${1}` is the first group (`$1xxx` would
+        // name a group `1xxx`).
+        let out = texts(&[Some("tel:+31612345678")], r"regexp_replace(c, '^(tel:[+]\\d{2})\\d+$', '${1}xxx')");
+        assert_eq!(out, vec![Some("tel:+31xxx".to_string())]);
+    }
+
+    #[test]
+    fn regexp_like_matches_and_keeps_nulls() {
+        let arr = Arc::new(StringArray::from(CALLERS.to_vec())) as ArrayRef;
+        let schema = Arc::new(Schema::new(vec![Field::new("c", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+        let out = eval(&parse(&format!("regexp_like(c, {PHONE})")).unwrap(), &batch).unwrap();
+        let b = out.as_any().downcast_ref::<BooleanArray>().unwrap();
+        let got: Vec<Option<bool>> = b.iter().collect();
+        assert_eq!(got, vec![Some(true), Some(true), Some(false), Some(false), Some(false), None, Some(true)]);
+        // As a filter: three phone numbers.
+        assert_eq!(apply_condition(batch, &format!("regexp_like(c, {PHONE})")).unwrap().num_rows(), 3);
+    }
+
+    #[test]
+    fn regexp_rejects_bad_patterns() {
+        let arr = Arc::new(StringArray::from(vec![Some("x")])) as ArrayRef;
+        let schema = Arc::new(Schema::new(vec![Field::new("c", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+        let err = eval(&parse("regexp_like(c, '(')").unwrap(), &batch).unwrap_err().to_string();
+        assert!(err.contains("invalid pattern"), "{err}");
+        let err = eval(&parse("regexp_replace(c, 'x', c)").unwrap(), &batch).unwrap_err().to_string();
+        assert!(err.contains("string literal"), "{err}");
     }
 }
