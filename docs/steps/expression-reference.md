@@ -116,6 +116,12 @@ Drop the `, UTC` part for a naive (timezone-unaware) timestamp: `cast(col, "time
 | `is_not_null(col)` | `isnotnull`, `not_null` | Boolean | True if the value is not null |
 | `if_null(col, default)` | `ifnull`, `nvl` | same as args | Returns `col` if non-null, otherwise `default`. Preserves the original Arrow type when both arguments share the same type; falls back to `Utf8` when types differ. |
 
+## Conditional functions
+
+| Function | Aliases | Return type | Description |
+|---|---|---|---|
+| `if(cond, then, else)` | `iif` | same as args | `then` where `cond` is true, otherwise `else`; a NULL condition counts as false (SQL `CASE WHEN`). Preserves the Arrow type when `then` and `else` share it; falls back to `Utf8` when they differ. Example: `if(is_null(value) or regexp_like(key, '^(?:a|b)$'), value, 'redacted')` keeps `value` for the keys `a` and `b` and for NULLs, and replaces it for every other key. |
+
 ## Type casting
 
 | Function | Return type | Description |

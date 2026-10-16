@@ -7,6 +7,16 @@ before 0.0.3 are only recorded as git tags.
 
 ## [Unreleased]
 
+## [0.0.6] - 2026-10-16
+
+### Added
+
+- Expression function `if(cond, then, else)` (alias `iif`): `then` where `cond` is true,
+  otherwise `else`. A NULL condition counts as false, like SQL `CASE WHEN`. The Arrow type is
+  kept when both branches share it, otherwise the result is Utf8. Together with
+  `regexp_like` this keeps a value only for whitelisted keys, e.g.
+  `if(is_null(value) or regexp_like(key, '^(?:a|b)$'), value, 'redacted')`.
+
 ## [0.0.5] - 2026-10-14
 
 ### Added

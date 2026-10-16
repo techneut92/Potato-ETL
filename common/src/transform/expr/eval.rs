@@ -416,6 +416,31 @@ fn eval_call(func: &str, args: &[Expr], batch: &RecordBatch, n: usize) -> anyhow
             }
         }
 
+        // ── Conditional ───────────────────────────────────────────────────────
+        // `if(cond, then, else)`: `then` where `cond` is true, otherwise `else`. A NULL
+        // condition counts as false, like SQL `CASE WHEN`.
+        "if" | "iif" => {
+            anyhow::ensure!(args.len() == 3, "{func}(cond, then, else) takes 3 arguments");
+            let cond = to_boolean(&eval(&args[0], batch)?)?;
+            let then = eval(&args[1], batch)?;
+            let other = eval(&args[2], batch)?;
+            let mask: BooleanArray = (0..n)
+                .map(|i| Some(cond.is_valid(i) && cond.value(i)))
+                .collect();
+
+            if then.data_type() == other.data_type() {
+                Ok(arrow_zip(&mask, &then, &other)?)
+            } else {
+                let then_strs  = to_string_array(&then)?;
+                let other_strs = to_string_array(&other)?;
+                let result: StringArray = mask.values().iter()
+                    .zip(then_strs.iter().zip(other_strs.iter()))
+                    .map(|(m, (t, o))| if m { t.map(str::to_string) } else { o.map(str::to_string) })
+                    .collect();
+                Ok(Arc::new(result))
+            }
+        }
+
         // ── Aggregate stubs ───────────────────────────────────────────────────
         "sum" | "count" | "min" | "max" | "avg" | "mean" | "first" => {
             anyhow::bail!(
@@ -682,5 +707,45 @@ mod tests {
         assert!(err.contains("invalid pattern"), "{err}");
         let err = eval(&parse("regexp_replace(c, 'x', c)").unwrap(), &batch).unwrap_err().to_string();
         assert!(err.contains("string literal"), "{err}");
+    }
+
+    fn key_value_batch() -> RecordBatch {
+        let keys = StringArray::from(vec![
+            Some("Postcode"), Some("TransferToGGD"), Some("CallingNumber"), Some("CallingNumber"), Some("EmailAdres"), None,
+        ]);
+        let values = StringArray::from(vec![
+            Some("1234AB"), Some("true"), Some("tel:+31612345678"), None, Some("a@b.nl"), Some("x"),
+        ]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, true),
+            Field::new("value", DataType::Utf8, true),
+        ]));
+        RecordBatch::try_new(schema, vec![Arc::new(keys), Arc::new(values)]).unwrap()
+    }
+
+    #[test]
+    fn if_keeps_whitelisted_values_and_nulls() {
+        let expr = "if(is_null($source.value) or regexp_like($source.key, '(?i)^(?:Postcode|transferToGGD)$'), \
+                    $source.value, '<Redacted>')";
+        let out = eval(&parse(expr).unwrap(), &key_value_batch()).unwrap();
+        assert_eq!(out.data_type(), &DataType::Utf8);
+        let got: Vec<Option<String>> = to_string_array(&out).unwrap().iter().map(|v| v.map(str::to_string)).collect();
+        let r = Some("<Redacted>".to_string());
+        // A NULL key makes regexp_like NULL, which counts as false.
+        assert_eq!(got, vec![Some("1234AB".into()), Some("true".into()), r.clone(), None, r.clone(), r]);
+    }
+
+    #[test]
+    fn if_keeps_the_type_of_matching_branches() {
+        let ints = Arc::new(Int64Array::from(vec![Some(1), Some(5), None])) as ArrayRef;
+        let schema = Arc::new(Schema::new(vec![Field::new("c", DataType::Int64, true)]));
+        let batch = RecordBatch::try_new(schema, vec![ints]).unwrap();
+        let out = eval(&parse("if(c > 2, c, c)").unwrap(), &batch).unwrap();
+        assert_eq!(out.data_type(), &DataType::Int64);
+        let out = eval(&parse("if(c > 2, 'big', c)").unwrap(), &batch).unwrap();
+        let got: Vec<Option<String>> = to_string_array(&out).unwrap().iter().map(|v| v.map(str::to_string)).collect();
+        assert_eq!(got, vec![Some("1".into()), Some("big".into()), None]);
+        let err = eval(&parse("if(c > 2, c)").unwrap(), &batch).unwrap_err().to_string();
+        assert!(err.contains("takes 3 arguments"), "{err}");
     }
 }
