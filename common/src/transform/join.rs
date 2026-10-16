@@ -5,6 +5,13 @@
 //!   2. Stream the LEFT-side (the larger fact table); for each row: lookup in the hash map.
 //!   3. Output: combined columns of left + right (join key not duplicated).
 //!
+//! Output columns are gathered from the input arrays with Arrow's `take`, so
+//! every column keeps its type: a batch without a single match still gets the
+//! right side's types (all NULL), and timestamps stay timestamps. The output
+//! schema is the left schema followed by the right side's non-key columns; it
+//! is the same for every batch of one join. A right column whose name is also
+//! a left column replaces the left value on matched rows.
+//!
 //! ## NULL key semantics
 //!
 //! Following SQL semantics, NULL keys never match — not even other NULLs.
@@ -14,37 +21,33 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use arrow::array::{Array, StringArray};
-use arrow::compute::cast;
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::array::{new_null_array, Array, ArrayRef, BooleanArray, StringArray, UInt32Array};
+use arrow::compute::{cast, concat_batches, take};
+use arrow::compute::kernels::zip::zip;
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 
 use crate::config::JoinHow;
-use crate::util::arrow::json_rows_to_record_batch;
 
 // ── Public streaming API ──────────────────────────────────────────────────────
 
 /// Pre-built hash map of the right (build) side of a join.
 ///
-/// Keys are non-NULL string representations of the join column.  NULL keys
-/// are stored separately in `null_rows` for FULL join emission.
+/// The right side is concatenated into one batch; the map points from each
+/// non-NULL key (as a string) to its row numbers in that batch.
 pub struct RightHashMap {
-    /// Non-NULL key → right-side rows.
-    map: HashMap<String, Vec<serde_json::Value>>,
+    /// All right-side rows, or `None` when the right side was empty.
+    right: Option<RecordBatch>,
+    /// Non-NULL key → right-side row numbers.
+    map: HashMap<String, Vec<u32>>,
     /// Right-side rows whose join key was NULL (never matched, but emitted
     /// in FULL joins).
-    null_rows: Vec<serde_json::Value>,
+    null_rows: Vec<u32>,
     key: String,
-    /// Number of right-side columns (excluding the join key).  Used to
-    /// generate NULL-padded right columns for unmatched left rows.
-    right_non_key_fields: Vec<String>,
     /// Keys that were matched by at least one left-side row.  Only tracked
     /// when `how == Full` so that unmatched right rows can be emitted.
     matched_keys: Option<std::sync::Mutex<HashSet<String>>>,
 }
-
-// RightHashMap fields are all Send+Sync-safe types (HashMap, Vec, String,
-// Mutex<HashSet>).  No unsafe impl needed.
 
 /// Builds the right-side hash map from a fully-materialised slice of batches.
 pub fn build_right_hash_map(
@@ -52,14 +55,26 @@ pub fn build_right_hash_map(
     key:     &str,
     how:     &JoinHow,
 ) -> anyhow::Result<RightHashMap> {
-    let right_non_key_fields: Vec<String> = batches.first()
-        .map(|b| b.schema().fields().iter()
-            .filter(|f| f.name() != key)
-            .map(|f| f.name().clone())
-            .collect())
-        .unwrap_or_default();
+    let right = match batches.first() {
+        Some(first) => Some(
+            concat_batches(&first.schema(), batches)
+                .map_err(|e| anyhow::anyhow!("join: right-side batches do not share one schema: {e}"))?,
+        ),
+        None => None,
+    };
 
-    let (map, null_rows) = build_right_map(batches, key)?;
+    let mut map: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut null_rows = Vec::new();
+    if let Some(right) = &right {
+        let keys = key_strings(right, key, "right side")?;
+        for i in 0..keys.len() {
+            if keys.is_null(i) {
+                null_rows.push(i as u32);
+            } else {
+                map.entry(keys.value(i).to_string()).or_default().push(i as u32);
+            }
+        }
+    }
 
     let matched_keys = if *how == JoinHow::Full {
         Some(std::sync::Mutex::new(HashSet::new()))
@@ -67,7 +82,7 @@ pub fn build_right_hash_map(
         None
     };
 
-    Ok(RightHashMap { map, null_rows, key: key.to_string(), right_non_key_fields, matched_keys })
+    Ok(RightHashMap { right, map, null_rows, key: key.to_string(), matched_keys })
 }
 
 /// Probes one left-side batch against a pre-built [`RightHashMap`].
@@ -78,97 +93,96 @@ pub fn probe_left_batch(
 ) -> anyhow::Result<Option<RecordBatch>> {
     if batch.num_rows() == 0 { return Ok(None); }
 
-    let key     = &right_map.key;
-    let key_col = batch.column_by_name(key)
-        .ok_or_else(|| anyhow::anyhow!("Join key '{key}' not found in left batch"))?;
-    let key_str = cast(key_col, &DataType::Utf8)?;
-    let key_arr = key_str.as_any().downcast_ref::<StringArray>().unwrap();
+    let keys = key_strings(&batch, &right_map.key, "left batch")?;
+    let keep_unmatched = *how == JoinHow::Left || *how == JoinHow::Full;
 
-    let left_rows  = batch_to_json(&batch);
-    let mut output = Vec::new();
-
-    for (i, left_row) in left_rows.iter().enumerate() {
+    let mut left_idx: Vec<u32> = Vec::new();
+    let mut right_idx: Vec<Option<u32>> = Vec::new();
+    for i in 0..batch.num_rows() {
         // NULL keys never match (SQL semantics).
-        if key_arr.is_null(i) {
-            if *how == JoinHow::Left || *how == JoinHow::Full {
-                // Emit left row with NULLs for right-side columns.
-                let padded = pad_right_nulls(left_row.clone(), &right_map.right_non_key_fields);
-                output.push(padded);
-            }
-            continue;
-        }
-
-        let k = key_arr.value(i);
-        match right_map.map.get(k) {
-            Some(right_rows) => {
+        let matches = if keys.is_null(i) { None } else { right_map.map.get(keys.value(i)) };
+        match matches {
+            Some(rows) => {
                 // Track matched key for FULL join unmatched-right emission.
                 if let Some(ref matched) = right_map.matched_keys {
-                    matched.lock().unwrap().insert(k.to_string());
+                    matched.lock().unwrap().insert(keys.value(i).to_string());
                 }
-                for right_row in right_rows {
-                    let mut merged = left_row.clone();
-                    if let (serde_json::Value::Object(m), serde_json::Value::Object(r)) =
-                        (&mut merged, right_row)
-                    {
-                        for (k2, v) in r {
-                            if k2 != key { m.insert(k2.clone(), v.clone()); }
-                        }
-                    }
-                    output.push(merged);
+                for &r in rows {
+                    left_idx.push(i as u32);
+                    right_idx.push(Some(r));
                 }
             }
-            None if *how == JoinHow::Left || *how == JoinHow::Full => {
-                let padded = pad_right_nulls(left_row.clone(), &right_map.right_non_key_fields);
-                output.push(padded);
+            None if keep_unmatched => {
+                left_idx.push(i as u32);
+                right_idx.push(None);
             }
             None => {}
         }
     }
+    if left_idx.is_empty() { return Ok(None); }
 
-    if output.is_empty() { return Ok(None); }
-    Ok(Some(json_rows_to_record_batch(&output)))
+    let left_idx  = UInt32Array::from(left_idx);
+    let right_idx = UInt32Array::from(right_idx);
+    let schema = output_schema(&batch.schema(), right_map, how);
+
+    let mut columns: Vec<ArrayRef> = batch.columns().iter()
+        .map(|c| take(c.as_ref(), &left_idx, None))
+        .collect::<Result<_, _>>()?;
+    if let Some(right) = &right_map.right {
+        let matched = BooleanArray::from_iter(right_idx.iter().map(|r| Some(r.is_some())));
+        for (field, col) in right.schema().fields().iter().zip(right.columns()) {
+            if field.name() == &right_map.key { continue; }
+            let taken = take(col.as_ref(), &right_idx, None)?;
+            match batch.schema().index_of(field.name()) {
+                // Same name on both sides: the right value wins where a row matched.
+                Ok(pos) => {
+                    let right_vals = cast(&taken, columns[pos].data_type())?;
+                    columns[pos] = zip(&matched, &right_vals, &columns[pos])?;
+                }
+                Err(_) => columns.push(taken),
+            }
+        }
+    }
+    Ok(Some(RecordBatch::try_new(schema, columns)?))
 }
 
 /// Emit unmatched right-side rows for a FULL join.
 ///
-/// Must be called AFTER all left-side batches have been probed.
+/// Must be called AFTER all left-side batches have been probed. `out_schema`
+/// is the schema of the probed batches; the result uses it unchanged: the key
+/// comes from the right side, the other left columns are NULL.
 /// Returns `None` if there are no unmatched right rows, or if the join
-/// type is not `Full`.
+/// type is not `Full`. The key name is taken from `right_map`; `_key` stays
+/// for callers.
 pub fn emit_unmatched_right(
-    right_map:   &RightHashMap,
-    left_schema: &Schema,
-    key:         &str,
+    right_map:  &RightHashMap,
+    out_schema: &Schema,
+    _key:       &str,
 ) -> anyhow::Result<Option<RecordBatch>> {
     let matched = match &right_map.matched_keys {
         Some(m) => m.lock().unwrap().clone(),
         None => return Ok(None), // Not a FULL join.
     };
+    let Some(right) = &right_map.right else { return Ok(None) };
 
-    let left_non_key_fields: Vec<String> = left_schema.fields().iter()
-        .filter(|f| f.name() != key)
-        .map(|f| f.name().clone())
+    // Right rows whose key was never matched, then those with a NULL key.
+    let mut rows: Vec<u32> = right_map.map.iter()
+        .filter(|(k, _)| !matched.contains(*k))
+        .flat_map(|(_, r)| r.iter().copied())
         .collect();
+    rows.sort_unstable();
+    rows.extend(&right_map.null_rows);
+    if rows.is_empty() { return Ok(None); }
+    let idx = UInt32Array::from(rows);
 
-    let mut output = Vec::new();
-
-    // Emit right rows whose key was never matched.
-    for (k, rows) in &right_map.map {
-        if !matched.contains(k) {
-            for row in rows {
-                let padded = pad_left_nulls(row.clone(), &left_non_key_fields);
-                output.push(padded);
-            }
-        }
-    }
-
-    // Emit right rows with NULL keys (never matchable).
-    for row in &right_map.null_rows {
-        let padded = pad_left_nulls(row.clone(), &left_non_key_fields);
-        output.push(padded);
-    }
-
-    if output.is_empty() { return Ok(None); }
-    Ok(Some(json_rows_to_record_batch(&output)))
+    let columns: Vec<ArrayRef> = out_schema.fields().iter()
+        .map(|field| match right.column_by_name(field.name()) {
+            // The key and every right column come from the right side.
+            Some(col) => Ok(cast(&take(col.as_ref(), &idx, None)?, field.data_type())?),
+            None => Ok(new_null_array(field.data_type(), idx.len())),
+        })
+        .collect::<anyhow::Result<_>>()?;
+    Ok(Some(RecordBatch::try_new(Arc::new(out_schema.clone()), columns)?))
 }
 
 // ── Batch API (kept for backward compat / tests) ──────────────────────────────
@@ -179,14 +193,12 @@ pub fn hash_join(
     key:   &str,
     how:   &JoinHow,
 ) -> anyhow::Result<Vec<RecordBatch>> {
-    if left.is_empty() || right.is_empty() {
-        if *how == JoinHow::Inner { return Ok(vec![]); }
+    if (left.is_empty() || right.is_empty()) && *how == JoinHow::Inner {
+        return Ok(vec![]);
     }
     let right_map = build_right_hash_map(right, key, how)?;
-    let left_schema  = match left.first()  { Some(b) => b.schema(), None => return Ok(vec![]) };
-    let right_schema = match right.first() { Some(b) => b.schema(), None => return Ok(vec![]) };
-    let _ = merged_schema(&left_schema, &right_schema, key)?;
-    let mut results = Vec::new();
+    if left.is_empty() { return Ok(vec![]); }
+    let mut results: Vec<RecordBatch> = Vec::new();
     for batch in left {
         if let Some(out) = probe_left_batch(batch.clone(), &right_map, how)? {
             results.push(out);
@@ -194,7 +206,8 @@ pub fn hash_join(
     }
     // FULL join: emit unmatched right-side rows.
     if *how == JoinHow::Full {
-        if let Some(unmatched) = emit_unmatched_right(&right_map, &left_schema, key)? {
+        let out_schema = output_schema(&left[0].schema(), &right_map, how);
+        if let Some(unmatched) = emit_unmatched_right(&right_map, &out_schema, key)? {
             results.push(unmatched);
         }
     }
@@ -203,94 +216,114 @@ pub fn hash_join(
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-fn build_right_map(
-    batches: &[RecordBatch],
-    key:     &str,
-) -> anyhow::Result<(HashMap<String, Vec<serde_json::Value>>, Vec<serde_json::Value>)> {
-    let mut map: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-    let mut null_rows: Vec<serde_json::Value> = Vec::new();
-    for batch in batches {
-        let key_col = batch.column_by_name(key)
-            .ok_or_else(|| anyhow::anyhow!("Join key '{key}' not found in right side"))?;
-        let key_str = cast(key_col, &DataType::Utf8)?;
-        let key_arr = key_str.as_any().downcast_ref::<StringArray>().unwrap();
-        let rows    = batch_to_json(batch);
-        for (i, row) in rows.into_iter().enumerate() {
-            if key_arr.is_null(i) {
-                null_rows.push(row);
-            } else {
-                let k = key_arr.value(i).to_string();
-                map.entry(k).or_default().push(row);
+/// The join key of `batch` as strings, so keys of different types can match.
+fn key_strings(batch: &RecordBatch, key: &str, side: &str) -> anyhow::Result<StringArray> {
+    let col = batch.column_by_name(key)
+        .ok_or_else(|| anyhow::anyhow!("Join key '{key}' not found in {side}"))?;
+    let strings = cast(col, &DataType::Utf8)?;
+    Ok(strings.as_any().downcast_ref::<StringArray>().unwrap().clone())
+}
+
+/// Left fields, then the right side's non-key fields that the left side does
+/// not have. Fields that can be NULL-padded are nullable: the right ones for
+/// LEFT and FULL joins, the left ones for FULL joins, and a left field that a
+/// nullable right field of the same name overwrites.
+fn output_schema(left: &Schema, right_map: &RightHashMap, how: &JoinHow) -> SchemaRef {
+    let full = *how == JoinHow::Full;
+    let right_schema = right_map.right.as_ref().map(|r| r.schema());
+    let overwritten_by_null = |name: &str| right_schema.as_ref()
+        .and_then(|s| s.field_with_name(name).ok())
+        .is_some_and(|f| f.is_nullable() && name != right_map.key);
+    let mut fields: Vec<Field> = left.fields().iter()
+        .map(|f| f.as_ref().clone().with_nullable(f.is_nullable() || full || overwritten_by_null(f.name())))
+        .collect();
+    if let Some(right) = &right_map.right {
+        for f in right.schema().fields() {
+            if f.name() != &right_map.key && left.index_of(f.name()).is_err() {
+                fields.push(f.as_ref().clone().with_nullable(f.is_nullable() || *how != JoinHow::Inner));
             }
         }
     }
-    Ok((map, null_rows))
+    Arc::new(Schema::new(fields))
 }
 
-/// Pad a left-side JSON row with NULL values for all right-side non-key columns.
-fn pad_right_nulls(mut row: serde_json::Value, right_fields: &[String]) -> serde_json::Value {
-    if let serde_json::Value::Object(ref mut m) = row {
-        for field in right_fields {
-            m.entry(field.clone()).or_insert(serde_json::Value::Null);
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{Int64Array, TimestampMicrosecondArray};
+
+    fn left_batch(keys: Vec<Option<&str>>, start: i64) -> RecordBatch {
+        let n = keys.len() as i64;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Utf8, true),
+            Field::new("ts", DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None), true),
+            Field::new("v", DataType::Int64, true),
+        ]));
+        RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(keys)),
+            Arc::new(TimestampMicrosecondArray::from((start..start + n).collect::<Vec<_>>())),
+            Arc::new(Int64Array::from((start..start + n).collect::<Vec<_>>())),
+        ]).unwrap()
     }
-    row
-}
 
-/// Pad a right-side JSON row with NULL values for all left-side non-key columns.
-fn pad_left_nulls(mut row: serde_json::Value, left_fields: &[String]) -> serde_json::Value {
-    if let serde_json::Value::Object(ref mut m) = row {
-        for field in left_fields {
-            m.entry(field.clone()).or_insert(serde_json::Value::Null);
-        }
+    fn right_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Utf8, false),
+            Field::new("flag", DataType::Boolean, false),
+            Field::new("v", DataType::Int64, false),
+        ]));
+        RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b", "b", "z"])),
+            Arc::new(BooleanArray::from(vec![true, true, false, true])),
+            Arc::new(Int64Array::from(vec![100, 200, 201, 900])),
+        ]).unwrap()
     }
-    row
-}
 
-fn batch_to_json(batch: &RecordBatch) -> Vec<serde_json::Value> {
-    use arrow::array::*;
-    (0..batch.num_rows()).map(|i| {
-        let mut map = serde_json::Map::new();
-        for (col_idx, field) in batch.schema().fields().iter().enumerate() {
-            let col = batch.column(col_idx);
-            let val = if col.is_null(i) {
-                serde_json::Value::Null
-            } else {
-                col_to_json_value(col.as_ref(), i)
-            };
-            map.insert(field.name().clone(), val);
-        }
-        serde_json::Value::Object(map)
-    }).collect()
-}
-
-fn col_to_json_value(col: &dyn Array, i: usize) -> serde_json::Value {
-    use arrow::array::*;
-    use serde_json::json;
-    if let Some(a) = col.as_any().downcast_ref::<Int64Array>()  { return json!(a.value(i)); }
-    if let Some(a) = col.as_any().downcast_ref::<Int32Array>()  { return json!(a.value(i)); }
-    if let Some(a) = col.as_any().downcast_ref::<Float64Array>(){ return json!(a.value(i)); }
-    if let Some(a) = col.as_any().downcast_ref::<Float32Array>(){ return json!(a.value(i)); }
-    if let Some(a) = col.as_any().downcast_ref::<BooleanArray>() { return json!(a.value(i)); }
-    if let Some(a) = col.as_any().downcast_ref::<StringArray>() { return json!(a.value(i)); }
-    if let Ok(s) = cast(col, &DataType::Utf8) {
-        if let Some(a) = s.as_any().downcast_ref::<StringArray>() {
-            return json!(a.value(i));
-        }
+    #[test]
+    fn left_join_keeps_types_also_without_matches() {
+        let right = build_right_hash_map(&[right_batch()], "k", &JoinHow::Left).unwrap();
+        let with_match = probe_left_batch(left_batch(vec![Some("a"), Some("x")], 0), &right, &JoinHow::Left).unwrap().unwrap();
+        let no_match   = probe_left_batch(left_batch(vec![Some("x"), None], 10), &right, &JoinHow::Left).unwrap().unwrap();
+        // The same schema for both batches: Boolean `flag`, timestamp `ts`.
+        assert_eq!(with_match.schema(), no_match.schema());
+        let names: Vec<_> = with_match.schema().fields().iter().map(|f| f.name().clone()).collect();
+        assert_eq!(names, vec!["k", "ts", "v", "flag"]);
+        assert!(matches!(with_match.schema().field(1).data_type(), DataType::Timestamp(_, _)));
+        let flag = no_match.column(3).as_any().downcast_ref::<BooleanArray>().unwrap();
+        assert_eq!(flag.null_count(), 2);
+        // `v` exists on both sides: the right value wins on the matched row only.
+        let v = with_match.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(v.values().to_vec(), vec![100, 1]);
     }
-    serde_json::Value::Null
-}
 
-fn merged_schema(
-    left:  &Schema,
-    right: &Schema,
-    key:   &str,
-) -> anyhow::Result<Arc<Schema>> {
-    let mut fields: Vec<Field> = left.fields().iter().map(|f| (**f).clone()).collect();
-    for f in right.fields() {
-        if f.name() != key {
-            fields.push((**f).clone());
-        }
+    #[test]
+    fn inner_join_repeats_rows_per_match_and_drops_the_rest() {
+        let right = build_right_hash_map(&[right_batch()], "k", &JoinHow::Inner).unwrap();
+        let out = probe_left_batch(left_batch(vec![Some("b"), Some("x"), None], 0), &right, &JoinHow::Inner).unwrap().unwrap();
+        assert_eq!(out.num_rows(), 2);
+        let flag = out.column(3).as_any().downcast_ref::<BooleanArray>().unwrap();
+        assert_eq!(flag.iter().collect::<Vec<_>>(), vec![Some(true), Some(false)]);
+        assert!(probe_left_batch(left_batch(vec![Some("x")], 0), &right, &JoinHow::Inner).unwrap().is_none());
     }
-    Ok(Arc::new(Schema::new(fields)))
+
+    #[test]
+    fn full_join_emits_unmatched_right_rows_in_the_same_schema() {
+        let out = hash_join(&[left_batch(vec![Some("a")], 0)], &[right_batch()], "k", &JoinHow::Full).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].schema(), out[1].schema());
+        let unmatched = &out[1];
+        let keys = unmatched.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(keys.iter().collect::<Vec<_>>(), vec![Some("b"), Some("b"), Some("z")]);
+        assert_eq!(unmatched.column(1).null_count(), 3, "left-only `ts` is NULL");
+        let v = unmatched.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(v.values().to_vec(), vec![200, 201, 900], "`v` comes from the right side");
+    }
+
+    #[test]
+    fn empty_right_side_keeps_left_rows_for_a_left_join() {
+        let right = build_right_hash_map(&[], "k", &JoinHow::Left).unwrap();
+        let out = probe_left_batch(left_batch(vec![Some("a"), None], 0), &right, &JoinHow::Left).unwrap().unwrap();
+        assert_eq!(out.num_rows(), 2);
+        assert_eq!(out.num_columns(), 3);
+    }
 }

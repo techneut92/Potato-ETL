@@ -7,6 +7,19 @@ before 0.0.3 are only recorded as git tags.
 
 ## [Unreleased]
 
+## [0.0.7] - 2026-10-16
+
+### Fixed
+
+- The `join` step rebuilt every output batch from JSON rows and inferred the types again, so
+  a column could change type between batches and a sink failed with "column types must match
+  schema types" (for example a right-side Boolean that was all NULL in a batch without a
+  match became Utf8), and timestamps and decimals came out as text. The join now gathers the
+  input arrays with Arrow `take`: every column keeps its type and every batch of one join
+  has the same schema. Output columns are the left columns in order, then the right non-key
+  columns (before, the order followed the JSON keys). Unmatched right rows of a `full` join
+  use that same schema.
+
 ## [0.0.6] - 2026-10-16
 
 ### Added

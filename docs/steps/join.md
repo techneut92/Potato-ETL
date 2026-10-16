@@ -33,3 +33,9 @@ Hash-join two branches on a shared key column.
 | `full` | All rows from both sides; nulls where either side has no match |
 
 Note: The right side is fully materialised in memory before joining. For large right-side datasets, ensure sufficient memory.
+
+## Output columns
+
+The output has the left columns in their order, then the right side's columns except the key. Every column keeps its Arrow type, also in a batch without a single match (the right columns are then all NULL), so a sink sees the same schema in every batch. A right column with the same name as a left column replaces the left value on matched rows. Right columns are nullable for `left` and `full` joins, and left columns too for `full` joins.
+
+The key is compared as text, so keys of different types (for example an integer and a string column) can match.
